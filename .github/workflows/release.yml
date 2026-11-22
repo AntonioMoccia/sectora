@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag da pubblicare, già esistente (es. v0.1.0)"
+        description: "Versione da pubblicare (es. v0.1.0): il tag viene creato se non esiste"
         required: true
 
 permissions:
