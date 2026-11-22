@@ -1,0 +1,18 @@
+[package]
+name = "sectora-cli"
+description = "Riga di comando per il motore di recupero dati"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sectora"
+path = "src/main.rs"
+
+[dependencies]
+sectora-engine.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

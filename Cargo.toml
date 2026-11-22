@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "crates/cli", "apps/desktop/src-tauri"]
+# L'app desktop richiede le librerie WebKit su Linux: si compila a parte (vedi CI).
+default-members = ["crates/engine", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.80"
+repository = "https://github.com/AntonioMoccia/sectora"
+
+[workspace.dependencies]
+sectora-engine = { path = "crates/engine" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
