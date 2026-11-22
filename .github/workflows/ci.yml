@@ -35,11 +35,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y dosfstools mtools exfatprogs exfat-fuse ntfs-3g
+      - run: sudo apt-get update && sudo apt-get install -y dosfstools mtools exfatprogs exfat-fuse ntfs-3g python3-pil
       - run: pip install pillow
       - run: cargo build --release -p sectora-cli
-      # sudo serve per montare i volumi di prova; PATH per trovare cargo.
-      - run: sudo env "PATH=$PATH" python3 scripts/fs-test.py
+      # sudo serve per montare i volumi di prova. Il binario è già compilato:
+      # root non ha una toolchain Rust, quindi non si compila sotto sudo.
+      - run: sudo env "SECTORA_BIN=$PWD/target/release/sectora" /usr/bin/python3 scripts/fs-test.py
       - run: ./scripts/fat-test.sh
 
   desktop:
