@@ -38,7 +38,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y dosfstools mtools exfatprogs exfat-fuse ntfs-3g
       - run: pip install pillow
       - run: cargo build --release -p sectora-cli
-      - run: sudo python3 scripts/fs-test.py
+      # sudo serve per montare i volumi di prova; PATH per trovare cargo.
+      - run: sudo env "PATH=$PATH" python3 scripts/fs-test.py
       - run: ./scripts/fat-test.sh
 
   desktop:

@@ -18,7 +18,22 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "target", "release", "recover")
+BIN = os.environ.get("SECTORA_BIN", os.path.join(ROOT, "target", "release", "sectora"))
+
+
+def build_cli():
+    """Compila la CLI e ritorna il percorso dell'eseguibile, come lo riporta Cargo
+    (funziona anche con CARGO_TARGET_DIR personalizzato)."""
+    import json as _json
+    out = subprocess.run(
+        ["cargo", "build", "--release", "-p", "sectora-cli", "--message-format=json-render-diagnostics"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+    for line in out.splitlines():
+        msg = _json.loads(line)
+        if msg.get("reason") == "compiler-artifact" and msg.get("executable"):
+            return msg["executable"]
+    raise SystemExit("eseguibile sectora non trovato nell'output di cargo")
 random.seed(7)
 
 
@@ -383,8 +398,10 @@ def destination_on_source(work):
 
 
 def main():
-    if not os.path.exists(BIN):
-        run("cargo", "build", "--release", "-p", "sectora-cli", cwd=ROOT)
+    global BIN
+    if "SECTORA_BIN" not in os.environ:
+        BIN = build_cli()
+    print(f"Binario: {BIN}")
     work = tempfile.mkdtemp()
     results = []
     try:
