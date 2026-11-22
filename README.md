@@ -409,7 +409,7 @@ cargo test --release -p sectora-desktop -- --ignored --nocapture   # prestazioni
 
 1. Aggiorna la versione in `Cargo.toml` (workspace), `apps/desktop/package.json` e
    `apps/desktop/src-tauri/tauri.conf.json`, poi il [CHANGELOG](CHANGELOG.md).
-2. `git tag v0.2.0 && git push origin v0.2.0`
+2. `git tag v0.2.0 && git push origin v0.2.0`, oppure da GitHub: **Actions → Release → Run workflow** con la versione (es. `v0.2.0`): il tag viene creato in automatico.
 3. Il workflow **Release** compila la riga di comando e l'app per tutti i sistemi e li allega alla
    release su GitHub, insieme a `SHA256SUMS.txt`.
 

@@ -33,7 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "Sectora $TAG" --notes-file .github/release-notes.md
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "Sectora $TAG" --notes-file .github/release-notes.md
           fi
           echo "id=$(gh release view "$TAG" --json databaseId --jq .databaseId)" >> "$GITHUB_OUTPUT"
 
