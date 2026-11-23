@@ -406,6 +406,62 @@ def exfat_formatted_big(work):
     return check_big_folders("exFAT formattato, grandi", img, files, work)
 
 
+def ntfs_then_fat32(work):
+    """Volume NTFS con file, poi una FAT32 creata sopra (riformattazione con un
+    altro file system): i vecchi record MFT restano e l'albero NTFS va
+    ricostruito anche se oggi il volume è FAT32.
+
+    Linux mette la MFT all'inizio del volume (la FAT32 la cancellerebbe), Windows
+    la mette a 3 GB: per riprodurre il caso il vecchio NTFS inizia a 1 GB dentro
+    il disco e la nuova partizione FAT32 (da 1 MB) lo copre tutto. Così si prova
+    anche la geometria del vecchio volume con un inizio diverso.
+    """
+    import struct
+    disk = os.path.join(work, "ntfs-fat.img")
+    ntfs_img = os.path.join(work, "vecchio-ntfs.img")
+    with open(ntfs_img, "wb") as f:
+        f.truncate(1024 * 1024 * 1024)
+    run("mkntfs", "-F", "-Q", "-q", "-L", "PENNA", ntfs_img)
+    mnt = ntfs_img + ".mnt"
+    os.makedirs(mnt)
+    files = nested_files()
+    files["01_InstallationGuide.pdf"] = payload(120_000)
+    files["__MACOSX/._01_InstallationGuide.pdf"] = payload(260)
+    run("ntfs-3g", ntfs_img, mnt)
+    try:
+        write_tree(mnt, files)
+    finally:
+        run("umount", mnt)
+    size = 3 * 1024 * 1024 * 1024
+    with open(disk, "wb") as f:
+        f.truncate(size)
+    run("dd", f"if={ntfs_img}", f"of={disk}", "bs=1M", "seek=1024", "conv=sparse,notrunc", "status=none")
+    os.remove(ntfs_img)
+    # Nuova tabella: una partizione FAT32 da 1 MB alla fine del disco.
+    start, count = 2048, size // 512 - 2048
+    with open(disk, "r+b") as f:
+        f.seek(446)
+        f.write(bytes([0, 0, 0, 0, 0x0C, 0, 0, 0]) + struct.pack("<II", start, count))
+        f.seek(510)
+        f.write(b"\x55\xaa")
+    run("mkfs.vfat", "-F", "32", "-n", "PENNA", f"--offset={start}", disk, str(count // 2))
+    out = os.path.join(work, "out-ntfs-fat")
+    run(BIN, "restore", disk, "--out", out, "--rebuild")
+    got = restored_hashes(out)
+    ok, bad = 0, []
+    for rel, data in files.items():
+        h = got.get("Struttura precedente (NTFS)/" + rel)
+        if h == sha(data):
+            ok += 1
+        else:
+            bad.append(rel + (" (diverso)" if h else " (mancante)"))
+    status = "OK " if not bad else "ERR"
+    print(f"[{status}] {'NTFS poi FAT32':<28} albero NTFS ricostruito su FAT32: {ok}/{len(files)}")
+    for b in bad:
+        print(f"        {b}")
+    return not bad
+
+
 def fat32_fragmented(work):
     """Volume pieno, buchi alterni, file grande scritto a pezzi e poi cancellato.
 
@@ -503,6 +559,7 @@ def main():
         results.append(ntfs_formatted(work))
         results.append(fat32_formatted_big(work))
         results.append(exfat_formatted_big(work))
+        results.append(ntfs_then_fat32(work))
         results.append(fat32_fragmented(work))
         results.append(destination_on_source(work))
     finally:

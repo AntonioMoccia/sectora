@@ -66,8 +66,8 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 2. Apri **PowerShell come amministratore** (Start → digita `powershell` → tasto destro →
    *Esegui come amministratore*) ed estrai lo zip in `C:\Sectora`:
    ```powershell
-   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.1.2-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
-   cd C:\Sectora\sectora-cli-v0.1.2-windows-x86_64
+   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.1.3-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
+   cd C:\Sectora\sectora-cli-v0.1.3-windows-x86_64
    .\sectora.exe devices
    ```
    Se lo zip è altrove: tasto destro sullo zip → *Copia come percorso* e incollalo al posto del primo
@@ -96,10 +96,10 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 
 ```sh
 cd ~/Downloads
-tar xzf sectora-cli-v0.1.2-macos-universal.tar.gz
-xattr -d com.apple.quarantine sectora-cli-v0.1.2-macos-universal/sectora
+tar xzf sectora-cli-v0.1.3-macos-universal.tar.gz
+xattr -d com.apple.quarantine sectora-cli-v0.1.3-macos-universal/sectora
 sudo mkdir -p /usr/local/bin
-sudo mv sectora-cli-v0.1.2-macos-universal/sectora /usr/local/bin/
+sudo mv sectora-cli-v0.1.3-macos-universal/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -132,8 +132,8 @@ apri un'immagine creata con la riga di comando.
 **Riga di comando** (binario statico: funziona su qualsiasi distribuzione)
 
 ```sh
-tar xzf sectora-cli-v0.1.2-linux-x86_64.tar.gz
-sudo install sectora-cli-v0.1.2-linux-x86_64/sectora /usr/local/bin/
+tar xzf sectora-cli-v0.1.3-linux-x86_64.tar.gz
+sudo install sectora-cli-v0.1.3-linux-x86_64/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -162,6 +162,11 @@ Su chiavette e schede SD (FAT32 ed exFAT) il nome di una cartella è scritto nel
 contiene. Le cartelle di primo livello hanno il nome nella cartella principale della penna, che la
 formattazione azzera: il loro contenuto torna intero (sottocartelle, file, nomi), ma il nome di quelle
 cartelle non esiste più su nessun disco, e nessun programma lo può recuperare.
+
+Una penna può aver avuto più vite (es. NTFS, poi FAT32, poi formattata di nuovo): Sectora mostra i
+resti di ognuna. Le strutture NTFS sopravvissute finiscono in **Struttura precedente (NTFS)** con i
+nomi originali; quelle FAT/exFAT in **Struttura precedente**. Le cartelle `__MACOSX` e i file `._nome`
+sono metadati che il Mac aggiunge agli zip e alle penne: si possono ignorare.
 
 Sectora le mostra in **Struttura precedente** con un nome che ne descrive il contenuto, per esempio
 `Cartella ritrovata 2 (48 foto, 3 video, 2024)`. Guarda l'anteprima, rinominala (✎) con il nome
@@ -377,6 +382,7 @@ una copia vuota del disco e riproduce il problema.
 | --- | --- | --- |
 | File o cartelle cancellati (FAT12/16/32, exFAT, NTFS) | Lettura del file system | Originali, struttura ricreata identica |
 | Disco formattato (formattazione rapida) | Ricostruzione dalle strutture precedenti | NTFS: albero completo. FAT/exFAT: albero completo con sottocartelle e nomi, anche per cartelle con migliaia di file; le cartelle di primo livello diventano "Cartella ritrovata N (contenuto)" e si possono rinominare |
+| Disco NTFS riformattato FAT32 o exFAT | Ricostruzione dai vecchi record MFT | Albero completo con nomi originali, in "Struttura precedente (NTFS)" |
 | File system danneggiato o sconosciuto | Ricerca per firma | Nomi generati (`f<posizione>.jpg`) |
 
 Partizioni MBR (anche logiche) e GPT. La ricerca per firma riconosce JPEG, PNG, GIF, HEIC, MP4,

@@ -2,6 +2,22 @@
 
 Le versioni seguono il [versionamento semantico](https://semver.org/lang/it/).
 
+## [0.1.3] — 2026-11-23
+
+### Recupero
+- **NTFS sotto un altro file system:** una penna o un disco che era NTFS ed è stato riformattato
+  FAT32 o exFAT conserva i vecchi record MFT. Sectora ora li cerca anche se il volume attuale non è
+  NTFS e ricostruisce l'albero completo, con nomi e cartelle originali, in
+  `Struttura precedente (NTFS)`. Dimensione dei cluster e inizio del vecchio volume si ricavano dal
+  record di `$MFT`, quindi funziona anche se la partizione è cambiata.
+
+### Diagnosi
+- `sectora meta` salva i record MFT interi (prima solo la prima metà) e i settori di avvio.
+
+### Test
+- Nuova prova su file system reali: NTFS con file, poi FAT32 creata sopra; ogni file deve tornare
+  identico con il suo percorso originale.
+
 ## [0.1.2] — 2026-11-23
 
 ### Diagnosi
@@ -66,6 +82,7 @@ Prima versione pubblica.
 - Su macOS i dischi fisici richiedono `sudo`.
 - APFS, HFS+ ed ext4 solo con la ricerca per firma.
 
+[0.1.3]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.3
 [0.1.2]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.2
 [0.1.1]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.1
 [0.1.0]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.0

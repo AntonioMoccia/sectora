@@ -39,7 +39,19 @@ fn is_metadata(s: &[u8]) -> bool {
         || fs::exfat::continues_file_sets(s)
         || s.starts_with(b"FILE0")
         || s.starts_with(b"FILE*")
+        || is_boot_sector(s)
 }
+
+/// Settore di avvio di un file system (anche copie di riserva o di file system
+/// precedenti, es. quella di NTFS nell'ultimo settore del volume).
+fn is_boot_sector(s: &[u8]) -> bool {
+    s[510..512] == [0x55, 0xAA]
+        && (&s[3..11] == b"NTFS    " || &s[3..11] == b"EXFAT   " || fs::detect(s).is_some())
+}
+
+/// Settori da salvare dopo uno che inizia un record MFT: un record occupa 1 KiB
+/// (2 settori) e la verifica delle "fixup" richiede anche il secondo.
+const RECORD_TAIL: u32 = 1;
 
 /// Aree di sole strutture (inizio del disco, avvio e FAT di ogni volume).
 fn metadata_regions(src: &dyn BlockSource) -> Vec<(u64, u64)> {
@@ -100,6 +112,7 @@ pub fn dump_metadata(
 
     let mut buf = vec![0u8; CHUNK];
     let mut pos = 0u64;
+    let mut tail = 0u32;
     while pos < total {
         let want = CHUNK.min((total - pos) as usize);
         if read_exact_at(src, pos, &mut buf[..want]).is_err() {
@@ -110,7 +123,14 @@ pub fn dump_metadata(
         }
         for (i, s) in buf[..want].chunks(SECTOR).enumerate() {
             let at = pos + (i * SECTOR) as u64;
-            let keep = s.len() == SECTOR && (in_region(at) || is_metadata(s));
+            let mut keep = s.len() == SECTOR && (in_region(at) || is_metadata(s));
+            if tail > 0 {
+                keep = true;
+                tail -= 1;
+            }
+            if s.starts_with(b"FILE") {
+                tail = RECORD_TAIL;
+            }
             if keep {
                 if run.is_empty() {
                     run_start = at;
@@ -153,5 +173,19 @@ mod tests {
         assert!(!out.windows(13).any(|w| w == b"dati privati!"));
         assert!(out.windows(11).any(|w| w == b".          "));
         assert!(r.records >= 1);
+    }
+
+    #[test]
+    fn keeps_whole_mft_records() {
+        let mut disk = vec![0u8; 8 << 20];
+        let rec = 6 << 20;
+        disk[rec..rec + 5].copy_from_slice(b"FILE0");
+        disk[rec + 1022..rec + 1024].copy_from_slice(b"\x07\x00");
+        let mut out = Vec::new();
+        dump_metadata(&MemorySource::new(disk, "prova"), &mut out, |_, _| {}).unwrap();
+        // Record: offset (8) + lunghezza (4) + 1024 byte.
+        let pos = out.windows(5).position(|w| w == b"FILE0").unwrap();
+        let len = u32::from_le_bytes(out[pos - 4..pos].try_into().unwrap());
+        assert_eq!(len, 1024);
     }
 }

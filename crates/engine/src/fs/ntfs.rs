@@ -336,7 +336,7 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
         _ => None,
     });
     let allocated = |lcn: u64| is_allocated(bitmap.as_deref(), lcn);
-    let entries = build_entries(&records, cluster_size, &allocated, false);
+    let entries = build_entries(&records, cluster_size, &allocated, None);
 
     // Per la ricostruzione: i record "FILE" fuori dalla MFT attuale appartengono
     // al file system precedente (formattazione rapida).
@@ -353,6 +353,8 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
         live,
         bitmap,
         old: HashMap::new(),
+        mft0: None,
+        foreign: false,
     }));
     vol.entries = entries;
     Ok(())
@@ -360,11 +362,13 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
 
 /// Voci del volume a partire dai record MFT. Con `rebuilt` i record vengono dal
 /// file system precedente: tutti cancellati, sotto `REBUILT_DIR`, id distinti.
+/// `base`: posizione del vecchio volume NTFS rispetto a quello attuale (byte),
+/// per i record di un NTFS precedente su un volume oggi FAT/exFAT.
 fn build_entries(
     records: &HashMap<u64, Record>,
     cluster_size: u64,
     allocated: &dyn Fn(u64) -> bool,
-    rebuilt: bool,
+    rebuilt: Option<(&str, u64)>,
 ) -> Vec<FileEntry> {
     // Nome preferito: Win32 (1) o Win32&DOS (3), poi POSIX (0), infine DOS 8.3 (2).
     let best_name = |r: &Record| -> Option<(u64, String)> {
@@ -403,7 +407,7 @@ fn build_entries(
         if parent_path.starts_with("/$Extend") {
             continue; // metadati di sistema NTFS
         }
-        let deleted = rebuilt || !r.in_use || parent_deleted;
+        let deleted = rebuilt.is_some() || !r.in_use || parent_deleted;
 
         let (size, extents, condition) = match (&r.data, r.is_dir) {
             (_, true) => (
@@ -446,7 +450,14 @@ fn build_entries(
                 if *compressed_or_encrypted || (covered < *size && r.has_attr_list) {
                     (*size, Vec::new(), Condition::Unsupported)
                 } else {
-                    let ext = runs_to_extents(runs, cluster_size, *size);
+                    let mut ext = runs_to_extents(runs, cluster_size, *size);
+                    if let Some((_, base)) = rebuilt {
+                        for e in ext.iter_mut() {
+                            if let Extent::Disk { offset, .. } = e {
+                                *offset += base;
+                            }
+                        }
+                    }
                     let cond = if !deleted {
                         Condition::Intact
                     } else if runs
@@ -463,9 +474,9 @@ fn build_entries(
             }
         };
 
-        let prefix = if rebuilt { super::REBUILT_DIR } else { "" };
+        let prefix = rebuilt.map_or("", |(p, _)| p);
         entries.push(FileEntry {
-            id: if rebuilt { id | 1 << 40 } else { id },
+            id: if rebuilt.is_some() { id | 1 << 40 } else { id },
             path: format!("{prefix}{parent_path}/{name}"),
             name,
             size,
@@ -498,9 +509,49 @@ pub(crate) struct State {
     live: Vec<(u64, u64)>,
     bitmap: Option<Vec<u8>>,
     old: HashMap<u64, Record>,
+    /// Dove è stato trovato il record di $MFT (numero 0) e il primo cluster
+    /// che dichiara per la MFT: ne derivano dimensione dei cluster e inizio del
+    /// vecchio volume.
+    mft0: Option<(u64, u64)>,
+    /// Record di un NTFS precedente su un volume che oggi non è NTFS.
+    foreign: bool,
 }
 
 impl State {
+    /// Raccolta dei record di un NTFS precedente su un volume FAT o exFAT.
+    pub(crate) fn foreign() -> State {
+        State {
+            record_size: 1024,
+            cluster_size: 4096,
+            live: Vec::new(),
+            bitmap: None,
+            old: HashMap::new(),
+            mft0: None,
+            foreign: true,
+        }
+    }
+
+    /// Cluster del vecchio NTFS e suo inizio rispetto al volume attuale: il
+    /// record di $MFT si trova a `base + lcn * cluster`. Si preferisce la
+    /// soluzione con il vecchio volume allineato a quello attuale (stessa
+    /// partizione), poi un inizio allineato a 1 MiB, infine 4 KiB / stesso inizio.
+    fn foreign_geometry(&self) -> (u64, u64) {
+        let Some((at, lcn)) = self.mft0 else {
+            return (4096, 0);
+        };
+        let sizes = (9..=21).map(|s| 1u64 << s);
+        let base = |cs: u64| at.checked_sub(lcn.checked_mul(cs)?);
+        sizes
+            .clone()
+            .find(|&cs| base(cs) == Some(0))
+            .or_else(|| {
+                sizes
+                    .clone()
+                    .find(|&cs| base(cs).is_some_and(|b| b % (1 << 20) == 0))
+            })
+            .map(|cs| (cs, base(cs).unwrap_or(0)))
+            .unwrap_or((4096, 0))
+    }
     pub(crate) fn feed(&mut self, view: &dyn BlockSource, rel: u64, chunk: &[u8]) {
         let rs = self.record_size as usize;
         let mut i = ((512 - rel % 512) % 512) as usize;
@@ -519,6 +570,13 @@ impl State {
                 if ok && usa_off >= 48 && apply_fixup(&mut tmp) {
                     let number = u32::from_le_bytes(tmp[44..48].try_into().unwrap()) as u64;
                     if let Some(r) = parse_record(&tmp) {
+                        if number == 0 && self.mft0.is_none() {
+                            if let Some(DataAttr::NonResident { runs, .. }) = &r.data {
+                                if let Some((Some(lcn), _)) = runs.first() {
+                                    self.mft0 = Some((abs, *lcn));
+                                }
+                            }
+                        }
                         self.old.entry(number).or_insert(r);
                     }
                 }
@@ -528,9 +586,28 @@ impl State {
     }
 
     pub(crate) fn finish(self, _view: &dyn BlockSource) -> Vec<FileEntry> {
+        if self.foreign {
+            // Un volume FAT/exFAT contiene anche record "FILE" per caso solo raramente:
+            // senza la radice o con pochissimi record non è un vecchio NTFS.
+            if !self.old.contains_key(&ROOT) && self.old.len() < 8 {
+                return Vec::new();
+            }
+            let (cs, base) = self.foreign_geometry();
+            return build_entries(
+                &self.old,
+                cs,
+                &|_| false,
+                Some((super::REBUILT_NTFS_DIR, base)),
+            );
+        }
         let bitmap = self.bitmap;
         let allocated = |lcn: u64| is_allocated(bitmap.as_deref(), lcn);
-        build_entries(&self.old, self.cluster_size, &allocated, true)
+        build_entries(
+            &self.old,
+            self.cluster_size,
+            &allocated,
+            Some((super::REBUILT_DIR, 0)),
+        )
     }
 }
 

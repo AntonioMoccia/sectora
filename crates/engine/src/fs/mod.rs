@@ -120,6 +120,10 @@ pub struct Volume {
     /// Stato del file system usato dalla ricostruzione dopo formattazione.
     #[serde(skip)]
     pub(crate) state: Option<FsState>,
+    /// Ricostruzione di un NTFS precedente su un volume oggi FAT o exFAT
+    /// (penna formattata NTFS e poi riformattata con un altro file system).
+    #[serde(skip)]
+    pub(crate) foreign: Option<FsState>,
 }
 
 /// Dati del file system letto, che servono a ricostruire la struttura precedente
@@ -200,6 +204,10 @@ pub fn detect(sector0: &[u8]) -> Option<FsType> {
 
 /// Cartella in cui compare la struttura ricostruita dopo una formattazione.
 pub const REBUILT_DIR: &str = "/Struttura precedente";
+
+/// Cartella dell'albero ricostruito da un NTFS precedente su un volume che oggi
+/// ha un altro file system.
+pub const REBUILT_NTFS_DIR: &str = "/Struttura precedente (NTFS)";
 
 /// Coda di una directory ricostruita (FAT/exFAT). L'elenco di una cartella con
 /// molti file occupa più cluster, collegati dalla FAT: dopo una formattazione
@@ -354,6 +362,7 @@ pub fn scan_volume(
         error: None,
         entries: Vec::new(),
         state: None,
+        foreign: None,
     };
     let mut sector0 = vec![0u8; 512];
     if let Err(e) = read_exact_at(&view, 0, &mut sector0) {
@@ -371,6 +380,12 @@ pub fn scan_volume(
     };
     if let Err(e) = result {
         vol.error = Some(e);
+    }
+    if matches!(
+        vol.fs,
+        Some(FsType::Fat12 | FsType::Fat16 | FsType::Fat32 | FsType::ExFat)
+    ) {
+        vol.foreign = Some(FsState::Ntfs(ntfs::State::foreign()));
     }
     vol
 }
@@ -395,6 +410,9 @@ pub fn feed_rebuild(src: &dyn BlockSource, volumes: &mut [Volume], abs: u64, chu
             Some(FsState::Ntfs(s)) => s.feed(&view, rel, slice),
             None => {}
         }
+        if let Some(FsState::Ntfs(s)) = vol.foreign.as_mut() {
+            s.feed(&view, rel, slice);
+        }
     }
 }
 
@@ -411,6 +429,9 @@ pub fn finish_rebuild(src: &dyn BlockSource, volumes: &mut [Volume]) {
         let mut found = found;
         describe_found_folders(&mut found);
         vol.entries.extend(found);
+        if let Some(FsState::Ntfs(s)) = vol.foreign.take() {
+            vol.entries.extend(s.finish(&view));
+        }
     }
 }
 
@@ -690,6 +711,7 @@ impl Volume {
             error: self.error.clone(),
             entries: Vec::new(),
             state: None,
+            foreign: None,
         }
     }
 }
