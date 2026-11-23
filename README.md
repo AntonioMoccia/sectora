@@ -62,14 +62,17 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 
 **Riga di comando**
 
-1. Scarica `sectora-cli-…-windows-x86_64.zip` ed estrailo, per esempio in `C:\Sectora`.
-2. Apri il **Prompt dei comandi come amministratore** (Start → digita `cmd` → tasto destro →
-   *Esegui come amministratore*).
-3. Prova:
-   ```bat
+1. Scarica `sectora-cli-…-windows-x86_64.zip` nella cartella Download.
+2. Apri **PowerShell come amministratore** (Start → digita `powershell` → tasto destro →
+   *Esegui come amministratore*) ed estrai lo zip in `C:\Sectora`:
+   ```powershell
+   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.1.1-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
    cd C:\Sectora\sectora-cli-v0.1.1-windows-x86_64
-   sectora.exe devices
+   .\sectora.exe devices
    ```
+   Se lo zip è altrove: tasto destro sullo zip → *Copia come percorso* e incollalo al posto del primo
+   percorso. In PowerShell il programma si avvia con `.\sectora.exe`; nel Prompt dei comandi basta
+   `sectora.exe`.
 
 ### macOS
 
