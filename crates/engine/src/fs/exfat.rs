@@ -7,8 +7,8 @@
 //! posizione dei dati è nota con certezza.
 
 use super::{
-    clusters_to_extents, dos_datetime, utf16le, Condition, Extent, FileEntry, FsType, Integrity,
-    Volume,
+    clusters_to_extents, dos_datetime, fragment_owner, utf16le, Condition, DirTail, Extent,
+    FileEntry, FsType, Integrity, Volume,
 };
 use crate::carve::reader::ByteReader;
 use crate::source::BlockSource;
@@ -31,9 +31,53 @@ struct ExFat<'a> {
     visited: HashSet<u32>,
     label: Option<String>,
     bitmap: Option<Vec<u8>>,
+    tails: Vec<DirTail>,
+    /// Primi cluster di directory note: la lettura contigua di un elenco si ferma lì.
+    dir_starts: HashSet<u32>,
+}
+
+/// Il cluster può essere la continuazione di un elenco exFAT (gli entry set
+/// possono anche iniziare nel cluster precedente).
+fn continues_dir(d: &[u8]) -> bool {
+    d.len() >= 32 && matches!(d[0], 0x85 | 0x05 | 0xC0 | 0x40 | 0xC1 | 0x41)
+}
+
+fn has_end(d: &[u8]) -> bool {
+    d.chunks_exact(32).any(|e| e[0] == 0)
 }
 
 impl ExFat<'_> {
+    /// Elenco di una directory cancellata o ritrovata, a partire da `first`:
+    /// cluster contigui finché sembrano continuare l'elenco (al massimo `max`).
+    /// Ritorna dati, cluster letti e se l'elenco termina lì.
+    fn read_dir_contig(&mut self, first: u32, max: u32) -> Option<(Vec<u8>, Vec<u32>, bool)> {
+        let mut data = self.read_clusters(&[first]);
+        if data.is_empty() {
+            return None;
+        }
+        let mut clusters = vec![first];
+        loop {
+            if has_end(&data) {
+                return Some((data, clusters, true));
+            }
+            let next = clusters[clusters.len() - 1] + 1;
+            if clusters.len() as u32 >= max
+                || !self.valid(next)
+                || self.visited.contains(&next)
+                || self.dir_starts.contains(&next)
+            {
+                break;
+            }
+            let d = self.read_clusters(&[next]);
+            if !continues_dir(&d) {
+                break;
+            }
+            data.extend_from_slice(&d);
+            clusters.push(next);
+        }
+        Some((data, clusters, false))
+    }
+
     fn cluster_offset(&self, c: u32) -> u64 {
         self.g.heap_offset + (c as u64 - 2) * self.g.cluster_size
     }
@@ -92,10 +136,21 @@ impl ExFat<'_> {
         data
     }
 
-    fn walk(&mut self, data: &[u8], parent: &str, parent_deleted: bool, depth: u32) {
+    /// `tail`: ultimo cluster dell'elenco letto e cluster che mancano ancora
+    /// (solo per le directory ricostruite).
+    fn walk(
+        &mut self,
+        data: &[u8],
+        parent: &str,
+        parent_deleted: bool,
+        depth: u32,
+        tail: Option<(u32, u32)>,
+    ) {
         if depth > 64 {
             return;
         }
+        let start = self.entries.len();
+        let mut pending = None;
         let entries: Vec<&[u8]> = data.chunks_exact(32).collect();
         let mut subdirs = Vec::new();
         let mut i = 0;
@@ -121,6 +176,9 @@ impl ExFat<'_> {
                 }
                 0x85 | 0x05 => {
                     let secondary = e[1] as usize;
+                    if (2..=18).contains(&secondary) && i + secondary >= entries.len() {
+                        pending = Some(i * 32);
+                    }
                     if secondary >= 2 && i + secondary < entries.len() {
                         if let Some(sub) =
                             self.file_set(&entries[i..=i + secondary], parent, parent_deleted)
@@ -135,24 +193,50 @@ impl ExFat<'_> {
             }
             i += 1;
         }
+        if let Some((last, missing)) = tail {
+            let mut t = DirTail::new(
+                parent,
+                last,
+                missing,
+                &self.entries[start..],
+                self.g.heap_offset,
+                self.g.cluster_size,
+            );
+            if let Some(p) = pending {
+                t.pending = data[p..].to_vec();
+            }
+            self.tails.push(t);
+        }
 
+        self.dir_starts.extend(subdirs.iter().map(|s| s.1));
         for (path, first, len, no_fat, deleted) in subdirs {
             if !self.visited.insert(first) {
                 continue;
             }
             let len = len.min(64 << 20);
-            let clusters = match self.stream_clusters(first, len, no_fat) {
-                Some(c) => c,
-                // Catena FAT persa (cancellazione o formattazione): si prova l'ipotesi contigua.
-                None if deleted => match self.stream_clusters(first, len, true) {
-                    Some(c) => c,
-                    None => continue,
-                },
-                None => continue,
+            if deleted {
+                // Catena FAT persa (cancellazione o formattazione): cluster contigui
+                // finché continuano l'elenco; quelli mancanti si cercano dopo.
+                let n = len.div_ceil(self.g.cluster_size).max(1) as u32;
+                let Some((data, clusters, ended)) = self.read_dir_contig(first, n) else {
+                    continue;
+                };
+                let last = *clusters.last().unwrap();
+                let missing = if ended {
+                    0
+                } else {
+                    n.saturating_sub(clusters.len() as u32)
+                };
+                self.visited.extend(clusters.iter().copied());
+                self.walk(&data, &path, true, depth + 1, Some((last, missing)));
+                continue;
+            }
+            let Some(clusters) = self.stream_clusters(first, len, no_fat) else {
+                continue;
             };
             self.visited.extend(clusters.iter().copied());
             let data = self.read_clusters(&clusters);
-            self.walk(&data, &path, deleted, depth + 1);
+            self.walk(&data, &path, false, depth + 1, None);
         }
     }
 
@@ -294,18 +378,66 @@ fn starts_with_file_set(data: &[u8]) -> bool {
     set_checksum(&set) == u16::from_le_bytes([data[2], data[3]])
 }
 
+/// Nome del primo file completo del blocco.
+fn exfat_first_name(d: &[u8]) -> Option<String> {
+    let entries: Vec<&[u8]> = d.chunks_exact(32).collect();
+    let i = entries.iter().position(|e| matches!(e[0], 0x85 | 0x05))?;
+    let stream = entries.get(i + 1)?;
+    let len = stream[3] as usize;
+    let mut bytes = Vec::new();
+    for e in entries.iter().skip(i + 2).take(17) {
+        if e[0] & 0x7F != 0x41 {
+            break;
+        }
+        bytes.extend_from_slice(&e[2..32]);
+    }
+    bytes.truncate(len * 2);
+    let name = utf16le(&bytes);
+    (!name.is_empty()).then_some(name)
+}
+
+/// Quanto il blocco `frag` continua l'elenco di `t` (vedi `fragment_owner`).
+fn exfat_fit(t: &DirTail, frag: &[u8]) -> u8 {
+    let starts_clean = frag.first().is_some_and(|b| matches!(b, 0x85 | 0x05));
+    if t.pending.is_empty() {
+        return u8::from(starts_clean);
+    }
+    let mut joined = t.pending.clone();
+    joined.extend_from_slice(&frag[..frag.len().min(640)]);
+    if starts_with_file_set(&joined) {
+        2
+    } else {
+        0
+    }
+}
+
+/// Il cluster inizia con la parte finale di un entry set (iniziato nel cluster
+/// precedente dell'elenco) seguita da un entry set completo e valido.
+fn continues_file_sets(data: &[u8]) -> bool {
+    if data.len() < 32 || !matches!(data[0], 0xC0 | 0x40 | 0xC1 | 0x41) {
+        return false;
+    }
+    for (k, e) in data.chunks_exact(32).enumerate().take(19) {
+        match e[0] {
+            0xC0 | 0x40 | 0xC1 | 0x41 => continue,
+            0x85 | 0x05 => return starts_with_file_set(&data[k * 32..]),
+            _ => return false,
+        }
+    }
+    false
+}
+
 impl ExFat<'_> {
     /// Directory del file system precedente non raggiungibili dall'attuale
-    /// (dopo una formattazione): ricostruite sotto `REBUILT_DIR`.
-    /// Ricostruisce gli alberi a partire dai cluster candidati (directory orfane).
-    fn rebuild_orphans(&mut self, candidates: Vec<u32>) {
+    /// (dopo una formattazione), ricostruite sotto `REBUILT_DIR`. I candidati non
+    /// referenziati da altri sono le cartelle di primo livello (il loro nome stava
+    /// nella radice, sovrascritta) oppure i blocchi successivi dell'elenco di una
+    /// cartella già ricostruita: questi vengono riattaccati alla cartella giusta.
+    fn rebuild_orphans(&mut self, mut candidates: Vec<u32>) {
+        candidates.retain(|c| !self.visited.contains(c));
+        candidates.sort_unstable();
+        candidates.dedup();
         let cs = self.g.cluster_size as usize;
-        let candidates: Vec<u32> = candidates
-            .into_iter()
-            .filter(|c| !self.visited.contains(c))
-            .collect();
-        // Le sottodirectory sono raggiunte dalla directory madre: le radici sono
-        // i candidati che nessun altro candidato referenzia.
         let mut referenced = HashSet::new();
         for &c in &candidates {
             let off = self.cluster_offset(c);
@@ -322,28 +454,38 @@ impl ExFat<'_> {
                 }
             }
         }
-        let mut n = 0;
+        self.dir_starts.extend(referenced.iter().copied());
+        // In ordine di posizione sul disco, cioè di scrittura: la cartella a cui
+        // appartiene un blocco è sempre già stata ricostruita quando lo si incontra.
         let order: Vec<u32> = candidates
             .iter()
             .filter(|c| !referenced.contains(c))
             .chain(candidates.iter())
             .copied()
             .collect();
+        let mut n = 0;
         for top in order {
-            if !self.visited.insert(top) {
+            if self.visited.contains(&top) {
                 continue;
             }
-            let clusters: Vec<u32> = (top..top.saturating_add(16))
-                .take_while(|c| self.valid(*c))
-                .collect();
-            let mut data = self.read_clusters(&clusters);
-            if let Some(end) = data.chunks_exact(32).position(|e| e[0] == 0) {
-                data.truncate(end * 32);
-            }
-            // I cluster successivi letti fanno parte di questa directory.
-            let used = data.len().div_ceil(cs) as u32;
-            for c in top..top + used {
-                self.visited.insert(c);
+            let Some((data, clusters, ended)) = self.read_dir_contig(top, 16) else {
+                continue;
+            };
+            self.visited.extend(clusters.iter().copied());
+            let last = *clusters.last().unwrap();
+            let first = exfat_first_name(&data);
+            if let Some(i) =
+                fragment_owner(&self.tails, top, first.as_deref(), |t| exfat_fit(t, &data))
+            {
+                let owner = &mut self.tails[i];
+                let rest = owner.missing.saturating_sub(clusters.len() as u32);
+                owner.missing = 0;
+                let path = owner.path.clone();
+                let mut joined = std::mem::take(&mut owner.pending);
+                joined.extend_from_slice(&data);
+                let missing = if ended { 0 } else { rest };
+                self.walk(&joined, &path, true, 1, Some((last, missing)));
+                continue;
             }
             n += 1;
             let path = format!("{}/Cartella ritrovata {n}", super::REBUILT_DIR);
@@ -360,7 +502,8 @@ impl ExFat<'_> {
                 extents: Vec::new(),
             });
             self.next_id += 1;
-            self.walk(&data, &path, true, 1);
+            // Lunghezza sconosciuta: se l'elenco non termina, può continuare altrove.
+            self.walk(&data, &path, true, 1, Some((last, u32::from(!ended))));
         }
     }
 }
@@ -374,11 +517,12 @@ pub(crate) struct State {
     next_id: u64,
     bitmap: Option<Vec<u8>>,
     candidates: Vec<u32>,
+    tails: Vec<DirTail>,
 }
 
 impl State {
     pub(crate) fn feed(&mut self, view: &dyn BlockSource, rel: u64, chunk: &[u8]) {
-        const HEAD: usize = 640; // entry set più lungo: 19 voci da 32 byte
+        const HEAD: usize = 1280; // due entry set lunghi: 19 voci da 32 byte ciascuno
         let cs = self.g.cluster_size;
         let heap = self.g.heap_offset;
         let end = rel + chunk.len() as u64;
@@ -402,7 +546,9 @@ impl State {
             } else {
                 &[]
             };
-            if !self.visited.contains(&c) && starts_with_file_set(head) {
+            if !self.visited.contains(&c)
+                && (starts_with_file_set(head) || continues_file_sets(head))
+            {
                 self.candidates.push(c);
             }
             k += 1;
@@ -418,6 +564,8 @@ impl State {
             visited: self.visited,
             label: None,
             bitmap: self.bitmap,
+            tails: self.tails,
+            dir_starts: HashSet::new(),
         };
         fs.rebuild_orphans(self.candidates);
         fs.entries
@@ -455,6 +603,8 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
         visited: HashSet::new(),
         label: None,
         bitmap: None,
+        tails: Vec::new(),
+        dir_starts: HashSet::new(),
     };
     let root_chain = fs.chain(fs.g.root_cluster, 4096);
     if root_chain.is_empty() {
@@ -462,7 +612,7 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
     }
     let root = fs.read_clusters(&root_chain);
     fs.visited.extend(root_chain.iter().copied());
-    fs.walk(&root, "", false, 0);
+    fs.walk(&root, "", false, 0, None);
     vol.label = fs.label.take().filter(|l| !l.is_empty());
     vol.state = Some(super::FsState::ExFat(State {
         g: fs.g.clone(),
@@ -470,6 +620,7 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
         next_id: fs.next_id,
         bitmap: fs.bitmap.take(),
         candidates: Vec::new(),
+        tails: std::mem::take(&mut fs.tails),
     }));
     vol.entries = fs.entries;
     Ok(())

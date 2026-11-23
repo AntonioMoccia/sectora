@@ -319,6 +319,93 @@ def ntfs_formatted(work):
     return check_rebuilt("NTFS formattato", img, files, work, False)
 
 
+def big_folder_files():
+    """Due cartelle con 120 file ciascuna, scritte alternandole: l'elenco di ogni
+    cartella occupa più cluster, sparsi tra i dati dei file."""
+    files = {}
+    for i in range(1, 121):
+        files[f"Progetto/Foto/foto vacanza numero {i}.jpg"] = payload(15_000 + i * 7)
+        files[f"Progetto/Documenti/documento {i}.pdf"] = payload(4_000 + i)
+    return files
+
+
+def check_big_folders(name, image, files, work, named_tops=()):
+    """Dopo una formattazione ogni file deve tornare identico, nella sua cartella,
+    e le cartelle grandi non devono spezzarsi in più "Cartella ritrovata"."""
+    out = os.path.join(work, "out-" + name)
+    run(BIN, "restore", image, "--out", out, "--rebuild")
+    got = restored_hashes(out)
+    ok, bad, tops = 0, [], set()
+    for rel, data in files.items():
+        tail = rel.split("/", 1)[1]
+        match = [p for p in got if p.startswith("Struttura precedente/") and p.endswith("/" + tail)]
+        good = [m for m in match if got[m] == sha(data)]
+        if good:
+            ok += 1
+            if rel.startswith("Progetto/"):
+                tops.add(good[0].split("/")[1])
+        else:
+            bad.append(rel + (" (diverso)" if match else " (mancante)"))
+    if len(tops) > 1:
+        bad.append(f"cartella divisa in {len(tops)}: {sorted(tops)[:4]}")
+    named = sum(1 for t in named_tops if any(p.startswith(f"Struttura precedente/{t}/") for p in got))
+    if named_tops and named == 0:
+        bad.append("nessuna cartella di primo livello ha ritrovato il nome")
+    status = "OK " if not bad else "ERR"
+    extra = f", nomi di primo livello ritrovati: {named}/{len(named_tops)}" if named_tops else ""
+    print(f"[{status}] {name:<28} cartelle grandi ricostruite: {ok}/{len(files)}{extra}")
+    for b in bad[:10]:
+        print(f"        {b}")
+    return not bad
+
+
+def fat32_formatted_big(work):
+    """FAT32, cluster da 4 KB: cartelle da 120 file e radice con 60 cartelle
+    (più cluster: la formattazione azzera solo il primo)."""
+    img = os.path.join(work, "fat32-big.img")
+    with open(img, "wb") as f:
+        f.truncate(256 * 1024 * 1024)
+    run("mkfs.vfat", "-F", "32", "-s", "8", "-n", "PENNA", img)
+    src = os.path.join(work, "src-fat32-big")
+    files = big_folder_files()
+    write_tree(src, files)
+    run("mmd", "-i", img, "::/Progetto", "::/Progetto/Foto", "::/Progetto/Documenti")
+    for i in range(1, 121):
+        for rel in (f"Progetto/Foto/foto vacanza numero {i}.jpg", f"Progetto/Documenti/documento {i}.pdf"):
+            run("mcopy", "-i", img, os.path.join(src, rel), "::/" + rel)
+    tops = []
+    for i in range(1, 61):
+        rel = f"Cartella di primo livello {i}/note {i}.txt"
+        files[rel] = payload(3000 + i)
+        write_tree(src, {rel: files[rel]})
+        run("mmd", "-i", img, f"::/Cartella di primo livello {i}")
+        run("mcopy", "-i", img, os.path.join(src, rel), "::/" + rel)
+        tops.append(f"Cartella di primo livello {i}")
+    run("mkfs.vfat", "-F", "32", "-s", "8", "-n", "PENNA", img)
+    return check_big_folders("FAT32 formattato, grandi", img, files, work, tops)
+
+
+def exfat_formatted_big(work):
+    img = os.path.join(work, "exfat-big.img")
+    with open(img, "wb") as f:
+        f.truncate(256 * 1024 * 1024)
+    run("mkfs.exfat", "-c", "4K", "-L", "PENNA", img)
+    loop = run("losetup", "-f", "--show", img).stdout.strip()
+    mnt = os.path.join(work, "mnt-exfat-big")
+    os.makedirs(mnt)
+    files = big_folder_files()
+    try:
+        run("mount.exfat-fuse", loop, mnt)
+        for i in range(1, 121):  # scrittura alternata tra le due cartelle
+            write_tree(mnt, {k: v for k, v in files.items() if k.endswith(f" {i}.jpg") or k.endswith(f" {i}.pdf")})
+        run("umount", mnt)
+    finally:
+        subprocess.run(["umount", mnt], capture_output=True)
+        run("losetup", "-d", loop)
+    run("mkfs.exfat", "-c", "4K", "-L", "PENNA", img)
+    return check_big_folders("exFAT formattato, grandi", img, files, work)
+
+
 def fat32_fragmented(work):
     """Volume pieno, buchi alterni, file grande scritto a pezzi e poi cancellato.
 
@@ -414,6 +501,8 @@ def main():
         results.append(fat32_formatted(work))
         results.append(exfat_formatted(work))
         results.append(ntfs_formatted(work))
+        results.append(fat32_formatted_big(work))
+        results.append(exfat_formatted_big(work))
         results.append(fat32_fragmented(work))
         results.append(destination_on_source(work))
     finally:

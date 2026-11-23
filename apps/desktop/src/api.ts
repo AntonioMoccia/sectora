@@ -121,6 +121,8 @@ export const api = {
   selectionInfo: (sel: Selection) => invoke<{ count: number; size: number }>("selection_info", { sel }),
   preview: (key: string) => invoke<Preview>("preview", { key }),
   recover: (sel: Selection, dest: string) => invoke<void>("recover", { sel, dest }),
+  /** Rinomina una cartella dei risultati; ritorna l'id del nodo rinominato. */
+  renameFolder: (node: string, name: string) => invoke<string>("rename_folder", { node, name }),
 };
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<UnlistenFn> {

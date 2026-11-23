@@ -67,7 +67,7 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
    *Esegui come amministratore*).
 3. Prova:
    ```bat
-   cd C:\Sectora\sectora-cli-v0.1.0-windows-x86_64
+   cd C:\Sectora\sectora-cli-v0.1.1-windows-x86_64
    sectora.exe devices
    ```
 
@@ -93,10 +93,10 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 
 ```sh
 cd ~/Downloads
-tar xzf sectora-cli-v0.1.0-macos-universal.tar.gz
-xattr -d com.apple.quarantine sectora-cli-v0.1.0-macos-universal/sectora
+tar xzf sectora-cli-v0.1.1-macos-universal.tar.gz
+xattr -d com.apple.quarantine sectora-cli-v0.1.1-macos-universal/sectora
 sudo mkdir -p /usr/local/bin
-sudo mv sectora-cli-v0.1.0-macos-universal/sectora /usr/local/bin/
+sudo mv sectora-cli-v0.1.1-macos-universal/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -129,8 +129,8 @@ apri un'immagine creata con la riga di comando.
 **Riga di comando** (binario statico: funziona su qualsiasi distribuzione)
 
 ```sh
-tar xzf sectora-cli-v0.1.0-linux-x86_64.tar.gz
-sudo install sectora-cli-v0.1.0-linux-x86_64/sectora /usr/local/bin/
+tar xzf sectora-cli-v0.1.1-linux-x86_64.tar.gz
+sudo install sectora-cli-v0.1.1-linux-x86_64/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -148,7 +148,22 @@ sectora --help
    - **Profonda:** solo ricerca per firma. Funziona su dischi danneggiati, ma i file non hanno il nome originale.
 3. **Scegli i file.** A sinistra ci sono le cartelle, in alto le categorie (Foto, Video, Documenti…),
    a destra l'anteprima. Ogni file ha uno stato: *Verificato* e *Recuperabile* sono i più affidabili.
-4. **Recupera** in una cartella **su un altro disco**. Sectora ricrea la struttura delle cartelle.
+4. **Dai un nome alle cartelle ritrovate**, se serve (vedi sotto): passa sopra la cartella e fai clic
+   su ✎, oppure doppio clic sul nome.
+5. **Recupera** in una cartella **su un altro disco**. Sectora ricrea la struttura delle cartelle con
+   i nomi che vedi a sinistra.
+
+### Dopo una formattazione: cosa sono le "Cartella ritrovata"
+
+Su chiavette e schede SD (FAT32 ed exFAT) il nome di una cartella è scritto nella cartella che la
+contiene. Le cartelle di primo livello hanno il nome nella cartella principale della penna, che la
+formattazione azzera: il loro contenuto torna intero (sottocartelle, file, nomi), ma il nome di quelle
+cartelle non esiste più su nessun disco, e nessun programma lo può recuperare.
+
+Sectora le mostra in **Struttura precedente** con un nome che ne descrive il contenuto, per esempio
+`Cartella ritrovata 2 (48 foto, 3 video, 2024)`. Guarda l'anteprima, rinominala (✎) con il nome
+originale e recupera: otterrai la struttura com'era. Se la cartella principale aveva molti elementi
+(più di un blocco), quelli scritti per ultimi tornano anche con il loro nome.
 
 ---
 
@@ -347,7 +362,7 @@ indicando sistema operativo, comando eseguito e messaggio completo.
 | Situazione | Metodo | Nomi e cartelle |
 | --- | --- | --- |
 | File o cartelle cancellati (FAT12/16/32, exFAT, NTFS) | Lettura del file system | Originali, struttura ricreata identica |
-| Disco formattato (formattazione rapida) | Ricostruzione dalle strutture precedenti | NTFS: albero completo. FAT/exFAT: sottocartelle e file con nome; le cartelle di primo livello diventano "Cartella ritrovata N" |
+| Disco formattato (formattazione rapida) | Ricostruzione dalle strutture precedenti | NTFS: albero completo. FAT/exFAT: albero completo con sottocartelle e nomi, anche per cartelle con migliaia di file; le cartelle di primo livello diventano "Cartella ritrovata N (contenuto)" e si possono rinominare |
 | File system danneggiato o sconosciuto | Ricerca per firma | Nomi generati (`f<posizione>.jpg`) |
 
 Partizioni MBR (anche logiche) e GPT. La ricerca per firma riconosce JPEG, PNG, GIF, HEIC, MP4,

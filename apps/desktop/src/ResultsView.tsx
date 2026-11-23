@@ -36,6 +36,7 @@ function TreeBranch({
   query,
   selected,
   onSelect,
+  onRename,
   version,
 }: {
   node: TreeNode;
@@ -43,10 +44,35 @@ function TreeBranch({
   query: Query;
   selected: string | null;
   onSelect: (id: string) => void;
+  onRename: (id: string, name: string) => Promise<void>;
   version: string;
 }) {
   const [open, setOpen] = useState(depth === 0);
   const [children, setChildren] = useState<TreeNode[] | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  // Cartelle dei volumi (non la radice del volume né i "Trovati per firma").
+  const renamable = /^v\d+\|\/./.test(node.id);
+
+  const startEdit = () => {
+    if (!renamable) return;
+    setRenameError(null);
+    setEditing(node.label);
+  };
+  const confirm = async () => {
+    if (editing === null) return;
+    if (editing.trim() === node.label) {
+      setEditing(null);
+      return;
+    }
+    try {
+      await onRename(node.id, editing);
+      setEditing(null);
+      setRenameError(null);
+    } catch (e) {
+      setRenameError(String(e));
+    }
+  };
 
   useEffect(() => {
     setChildren(null);
@@ -74,11 +100,55 @@ function TreeBranch({
         >
           {node.has_children ? (open ? "▾" : "▸") : ""}
         </span>
-        <span className="tree-label" title={node.label}>
-          {node.label}
-        </span>
+        {editing !== null ? (
+          <input
+            className="tree-input"
+            autoFocus
+            value={editing}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setEditing(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") confirm();
+              if (e.key === "Escape") {
+                setEditing(null);
+                setRenameError(null);
+              }
+            }}
+            onBlur={() => {
+              if (!renameError) confirm();
+            }}
+          />
+        ) : (
+          <span
+            className="tree-label"
+            title={renamable ? `${node.label}\nDoppio clic per rinominare` : node.label}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              startEdit();
+            }}
+          >
+            {node.label}
+          </span>
+        )}
+        {renamable && editing === null && (
+          <button
+            className="tree-rename"
+            title="Rinomina la cartella: il recupero userà il nuovo nome"
+            onClick={(e) => {
+              e.stopPropagation();
+              startEdit();
+            }}
+          >
+            ✎
+          </button>
+        )}
         <span className="tree-count">{node.count.toLocaleString("it-IT")}</span>
       </div>
+      {renameError && (
+        <div className="tree-error small" style={{ paddingLeft: 22 + depth * 14 }}>
+          {renameError}
+        </div>
+      )}
       {open && children && children.length > 0 && (
         <ul className="tree">
           {children.map((c) => (
@@ -89,6 +159,7 @@ function TreeBranch({
               query={query}
               selected={selected}
               onSelect={onSelect}
+              onRename={onRename}
               version={version}
             />
           ))}
@@ -230,7 +301,22 @@ export function ResultsView({ scanId, onRecover, onNewScan }: Props) {
 
   // Albero: le radici dipendono da filtri e categoria, non dalla cartella scelta.
   const treeQuery = useMemo(() => ({ ...query, node: null }), [query]);
-  const treeVersion = `${scanId}|${query.only_deleted}|${query.category}|${query.text}`;
+  const [renames, setRenames] = useState(0);
+  const treeVersion = `${scanId}|${renames}|${query.only_deleted}|${query.category}|${query.text}`;
+  const renameFolder = useCallback(
+    async (id: string, name: string) => {
+      const newId = await api.renameFolder(id, name);
+      setRenames((n) => n + 1);
+      // La cartella aperta (o una sua sottocartella) cambia percorso; le righe si ricaricano.
+      setQuery((q) => {
+        const node =
+          q.node === id ? newId : q.node?.startsWith(id + "/") ? newId + q.node.slice(id.length) : q.node;
+        return { ...q, node };
+      });
+      setActive(null);
+    },
+    [],
+  );
   useEffect(() => {
     api.tree(treeQuery, null).then(setRoots);
   }, [treeVersion]);
@@ -302,10 +388,17 @@ export function ResultsView({ scanId, onRecover, onNewScan }: Props) {
               query={treeQuery}
               selected={query.node}
               onSelect={(id) => setQuery({ ...query, node: id })}
+              onRename={renameFolder}
               version={treeVersion}
             />
           ))}
         </ul>
+        {roots.length > 0 && (
+          <div className="sidebar-note small">
+            Puoi rinominare le cartelle (✎ o doppio clic), per esempio quelle ritrovate senza nome: il
+            recupero ricrea la struttura con i tuoi nomi.
+          </div>
+        )}
         {failedVolumes.map((v) => (
           <div key={v.index} className="sidebar-note small">
             <strong>{v.name}</strong>: {v.error}

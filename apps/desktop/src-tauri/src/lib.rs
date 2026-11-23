@@ -915,6 +915,112 @@ fn recover(
     Ok(())
 }
 
+/// Controlla un nome di cartella: deve essere valido su Windows, macOS e Linux,
+/// perché il recupero la ricrea con questo nome.
+fn valid_folder_name(name: &str) -> Result<String, String> {
+    let name = name.trim().trim_end_matches('.').trim_end().to_string();
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("Scrivi un nome per la cartella.".into());
+    }
+    if name.chars().count() > 200 {
+        return Err("Il nome è troppo lungo (massimo 200 caratteri).".into());
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| c.is_control() || "/\\:*?\"<>|".contains(*c))
+    {
+        return Err(format!("Il nome non può contenere il carattere {c:?}."));
+    }
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        return Err(format!("\"{name}\" è un nome riservato da Windows."));
+    }
+    Ok(name)
+}
+
+/// Rinomina la cartella `old` (percorso) del volume `vi` in `name`: cambia il
+/// percorso di tutto il suo contenuto. Ritorna il nuovo percorso.
+fn rename_paths(
+    entries: &mut [FileEntry],
+    items: &mut [Item],
+    vi: usize,
+    old: &str,
+    name: &str,
+) -> Result<String, String> {
+    let parent = old.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+    let new = format!("{parent}/{name}");
+    if new == old {
+        return Ok(new);
+    }
+    let old_prefix = format!("{old}/");
+    let new_prefix = format!("{new}/");
+    let under = |p: &str| p == old || p.starts_with(&old_prefix);
+    let mine = |i: &Item| i.volume == Some(vi) && i.origin == "fs";
+    if !entries.iter().any(|e| under(&e.path)) && !items.iter().any(|i| mine(i) && under(&i.folder))
+    {
+        return Err("Cartella non trovata.".into());
+    }
+    // Windows e macOS non distinguono maiuscole e minuscole: "foto" e "Foto" coincidono,
+    // salvo che si stia solo cambiando maiuscole/minuscole della stessa cartella.
+    let (new_l, new_prefix_l) = (new.to_lowercase(), new_prefix.to_lowercase());
+    let taken = |p: &str| {
+        let l = p.to_lowercase();
+        (l == new_l || l.starts_with(&new_prefix_l)) && !under(p)
+    };
+    if entries.iter().any(|e| taken(&e.path)) || items.iter().any(|i| mine(i) && taken(&i.folder)) {
+        return Err(format!(
+            "Esiste già una cartella \"{name}\" in questa posizione."
+        ));
+    }
+    let rename = |p: &mut String| {
+        if p == old {
+            *p = new.clone();
+        } else if let Some(rest) = p.strip_prefix(&old_prefix) {
+            *p = format!("{new_prefix}{rest}");
+        }
+    };
+    for e in entries.iter_mut() {
+        if e.path == old {
+            e.name = name.to_string();
+        }
+        rename(&mut e.path);
+    }
+    for it in items.iter_mut().filter(|i| mine(i)) {
+        rename(&mut it.folder);
+    }
+    Ok(new)
+}
+
+/// Rinomina una cartella dei risultati (es. una "Cartella ritrovata") prima del
+/// recupero: il recupero ricrea la struttura con il nuovo nome. Ritorna l'id del
+/// nodo rinominato.
+#[tauri::command]
+fn rename_folder(node: String, name: String, state: State<AppState>) -> Result<String, String> {
+    let name = valid_folder_name(&name)?;
+    let (vol, old) = node
+        .split_once('|')
+        .filter(|(v, f)| v.starts_with('v') && f.starts_with('/') && *f != "/")
+        .ok_or("Si possono rinominare solo le cartelle.")?;
+    let vi: usize = vol[1..].parse().map_err(|_| "volume non valido")?;
+    let mut guard = state.inner.lock().unwrap();
+    let inner = &mut *guard;
+    if inner.busy {
+        return Err("Attendi la fine della scansione.".into());
+    }
+    if vi >= inner.volumes.len() {
+        return Err("volume non valido".into());
+    }
+    let volumes = Arc::make_mut(&mut inner.volumes);
+    let items = Arc::make_mut(&mut inner.items);
+    let new = rename_paths(&mut volumes[vi].entries, items, vi, old, &name)?;
+    inner.cache = None;
+    Ok(format!("{vol}|{new}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -930,7 +1036,8 @@ pub fn run() {
             tree,
             selection_info,
             preview,
-            recover
+            recover,
+            rename_folder
         ])
         .run(tauri::generate_context!())
         .expect("errore all'avvio dell'app");
@@ -956,6 +1063,84 @@ mod tests {
             category: cat,
             ext: "jpg".into(),
         }
+    }
+
+    #[test]
+    fn rename_moves_the_whole_folder() {
+        let entry = |id: u64, path: &str, is_dir: bool| FileEntry {
+            id,
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            size: 1,
+            is_dir,
+            deleted: true,
+            modified: None,
+            condition: Condition::Probable,
+            integrity: Integrity::Unchecked,
+            extents: Vec::new(),
+        };
+        let base = "/Struttura precedente/Cartella ritrovata 1 (3 foto)";
+        let mut entries = vec![
+            entry(1, base, true),
+            entry(2, &format!("{base}/Foto"), true),
+            entry(3, &format!("{base}/Foto/a.jpg"), false),
+            entry(4, &format!("{base}/b.jpg"), false),
+            entry(
+                5,
+                "/Struttura precedente/Cartella ritrovata 10 (1 foto)/c.jpg",
+                false,
+            ),
+            entry(6, "/Struttura precedente/Lavoro/d.pdf", false),
+        ];
+        let mut items = vec![
+            item("v0:3", &format!("{base}/Foto"), "foto", true, 1),
+            item("v0:4", base, "foto", true, 1),
+            item(
+                "v0:5",
+                "/Struttura precedente/Cartella ritrovata 10 (1 foto)",
+                "foto",
+                true,
+                1,
+            ),
+        ];
+        let new = rename_paths(&mut entries, &mut items, 0, base, "Vacanze 2024").unwrap();
+        assert_eq!(new, "/Struttura precedente/Vacanze 2024");
+        assert_eq!(entries[0].name, "Vacanze 2024");
+        assert_eq!(
+            entries[2].path,
+            "/Struttura precedente/Vacanze 2024/Foto/a.jpg"
+        );
+        assert_eq!(items[0].folder, "/Struttura precedente/Vacanze 2024/Foto");
+        assert_eq!(items[1].folder, "/Struttura precedente/Vacanze 2024");
+        // Le altre cartelle, anche con un nome che inizia allo stesso modo, non cambiano.
+        assert!(entries[4].path.contains("Cartella ritrovata 10"));
+        assert_eq!(
+            items[2].folder,
+            "/Struttura precedente/Cartella ritrovata 10 (1 foto)"
+        );
+        // Nome già usato (anche con maiuscole diverse) e cartella inesistente.
+        assert!(rename_paths(&mut entries, &mut items, 0, &new, "lavoro").is_err());
+        assert!(rename_paths(&mut entries, &mut items, 0, "/Nessuna", "X").is_err());
+        // Solo maiuscole/minuscole della stessa cartella: consentito.
+        assert!(rename_paths(&mut entries, &mut items, 0, &new, "VACANZE 2024").is_ok());
+    }
+
+    #[test]
+    fn folder_names_are_checked() {
+        assert_eq!(
+            valid_folder_name("  Vacanze 2024  ").unwrap(),
+            "Vacanze 2024"
+        );
+        assert_eq!(valid_folder_name("Foto.").unwrap(), "Foto");
+        for bad in [
+            "", "  ", "..", "a/b", "a\\b", "che?", "CON", "com1", "lpt9.txt", "x\u{7}",
+        ] {
+            assert!(
+                valid_folder_name(bad).is_err(),
+                "{bad:?} dovrebbe essere rifiutato"
+            );
+        }
+        assert!(valid_folder_name("Console").is_ok());
     }
 
     #[test]

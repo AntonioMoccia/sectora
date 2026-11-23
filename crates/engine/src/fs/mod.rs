@@ -201,6 +201,94 @@ pub fn detect(sector0: &[u8]) -> Option<FsType> {
 /// Cartella in cui compare la struttura ricostruita dopo una formattazione.
 pub const REBUILT_DIR: &str = "/Struttura precedente";
 
+/// Coda di una directory ricostruita (FAT/exFAT). L'elenco di una cartella con
+/// molti file occupa più cluster, collegati dalla FAT: dopo una formattazione
+/// la FAT è azzerata e i cluster successivi al primo restano sparsi sul disco.
+/// Si annota quanti ne mancano e dove finiscono gli ultimi dati scritti, per
+/// riattaccare i blocchi ritrovati alla cartella giusta.
+#[derive(Clone, Debug)]
+pub(crate) struct DirTail {
+    pub path: String,
+    /// Cluster dell'elenco ancora da trovare (FAT: 1 se l'elenco non è terminato).
+    pub missing: u32,
+    /// Ultimo cluster occupato dall'elenco o dai file che contiene.
+    pub last_end: u32,
+    /// exFAT: voci finali incomplete (un entry set a cavallo tra due cluster),
+    /// da anteporre al blocco successivo.
+    pub pending: Vec<u8>,
+    /// Nome dell'ultimo file elencato.
+    pub last_name: String,
+}
+
+impl DirTail {
+    /// Coda di una directory appena letta: `last` è il suo ultimo cluster,
+    /// `files` le voci elencate direttamente al suo interno.
+    pub(crate) fn new(
+        path: &str,
+        last: u32,
+        missing: u32,
+        files: &[FileEntry],
+        data_offset: u64,
+        cluster_size: u64,
+    ) -> Self {
+        let mut last_end = last;
+        for e in files.iter().filter(|e| !e.is_dir) {
+            if let Some(Extent::Disk { offset, length }) = e.extents.last() {
+                if *length > 0 && *offset >= data_offset {
+                    let c = (offset + length - 1 - data_offset) / cluster_size + 2;
+                    last_end = last_end.max(c.min(u32::MAX as u64) as u32);
+                }
+            }
+        }
+        DirTail {
+            path: path.to_string(),
+            missing,
+            last_end,
+            pending: Vec::new(),
+            last_name: files
+                .iter()
+                .rev()
+                .find(|e| !e.is_dir)
+                .map(|e| e.name.to_lowercase())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Cartella a cui appartiene il blocco di elenco orfano al cluster `frag`.
+///
+/// `fit` valuta quanto il blocco si accorda con la coda di una cartella:
+/// 2 = la voce spezzata tra i due blocchi si ricompone (checksum corretto),
+/// 1 = compatibile, 0 = incompatibile. A parità contano la somiglianza tra il
+/// primo nome del blocco (`first_name`) e l'ultimo della cartella (i file di una
+/// cartella hanno spesso nomi in sequenza: IMG_0042, IMG_0043), poi la cartella
+/// scritta per ultima prima del blocco: Windows alloca il nuovo cluster di una
+/// cartella quando l'elenco si riempie, subito dopo i dati dell'ultimo file.
+pub(crate) fn fragment_owner(
+    tails: &[DirTail],
+    frag: u32,
+    first_name: Option<&str>,
+    fit: impl Fn(&DirTail) -> u8,
+) -> Option<usize> {
+    let first = first_name.map(str::to_lowercase);
+    tails
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.missing > 0 && t.last_end < frag)
+        .map(|(i, t)| {
+            let similar = first.as_deref().map_or(0, |f| {
+                f.chars()
+                    .zip(t.last_name.chars())
+                    .take_while(|(a, b)| a == b)
+                    .count()
+            });
+            (fit(t), similar, t.last_end, i)
+        })
+        .filter(|(f, ..)| *f > 0)
+        .max()
+        .map(|(.., i)| i)
+}
+
 /// Opzioni del Quick Scan.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScanOptions {
@@ -320,7 +408,121 @@ pub fn finish_rebuild(src: &dyn BlockSource, volumes: &mut [Volume]) {
             Some(FsState::Ntfs(s)) => s.finish(&view),
             None => Vec::new(),
         };
+        let mut found = found;
+        describe_found_folders(&mut found);
         vol.entries.extend(found);
+    }
+}
+
+/// Anno (calendario civile) di un istante Unix.
+fn year_of(ts: i64) -> i64 {
+    let days = ts.div_euclid(86_400);
+    // Algoritmo di H. Hinnant (civil_from_days).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    yoe + era * 400 + i64::from(month <= 2)
+}
+
+/// Categoria di un file per il riassunto di una cartella ritrovata.
+fn kind_of(name: &str) -> usize {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "heic" | "heif" | "gif" | "bmp" | "tif" | "tiff" | "webp"
+        | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" => 0,
+        "mp4" | "mov" | "avi" | "mkv" | "m4v" | "3gp" | "mts" | "wmv" | "webm" => 1,
+        "mp3" | "wav" | "m4a" | "flac" | "aac" | "ogg" | "wma" => 2,
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "odt" | "ods"
+        | "odp" | "rtf" | "csv" | "pages" | "numbers" | "key" => 3,
+        _ => 4,
+    }
+}
+
+/// Riassunto del contenuto: "48 foto, 3 video, 2019-2024" o "vuota".
+fn folder_summary(counts: &[usize; 5], years: Option<(i64, i64)>) -> String {
+    const LABELS: [(&str, &str); 5] = [
+        ("foto", "foto"),
+        ("video", "video"),
+        ("audio", "audio"),
+        ("documento", "documenti"),
+        ("altro file", "altri file"),
+    ];
+    let mut kinds: Vec<(usize, usize)> = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, &n)| n > 0)
+        .map(|(k, &n)| (n, k))
+        .collect();
+    if kinds.is_empty() {
+        return "vuota".into();
+    }
+    kinds.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut parts: Vec<String> = kinds
+        .iter()
+        .take(3)
+        .map(|&(n, k)| format!("{n} {}", if n == 1 { LABELS[k].0 } else { LABELS[k].1 }))
+        .collect();
+    if let Some((a, b)) = years {
+        parts.push(if a == b {
+            a.to_string()
+        } else {
+            format!("{a}-{b}")
+        });
+    }
+    parts.join(", ")
+}
+
+/// Le cartelle di primo livello ritrovate senza nome ("Cartella ritrovata N")
+/// prendono un nome che ne descrive il contenuto, per riconoscerle a colpo
+/// d'occhio: "Cartella ritrovata 2 (48 foto, 3 video, 2024)".
+pub(crate) fn describe_found_folders(entries: &mut [FileEntry]) {
+    use std::collections::HashMap;
+    let base = format!("{REBUILT_DIR}/Cartella ritrovata ");
+    let top_of = |path: &str| -> Option<String> {
+        let rest = path.strip_prefix(&base)?;
+        let n = rest.split('/').next()?;
+        Some(format!("{base}{n}"))
+    };
+    /// File per categoria e intervallo degli anni.
+    type Stats = ([usize; 5], Option<(i64, i64)>);
+    let mut stats: HashMap<String, Stats> = HashMap::new();
+    for e in entries.iter() {
+        let Some(top) = top_of(&e.path) else { continue };
+        let st = stats.entry(top).or_default();
+        if e.is_dir {
+            continue;
+        }
+        st.0[kind_of(&e.name)] += 1;
+        if let Some(ts) = e.modified {
+            let y = year_of(ts);
+            if (1981..=2100).contains(&y) {
+                st.1 = Some(st.1.map_or((y, y), |(a, b)| (a.min(y), b.max(y))));
+            }
+        }
+    }
+    let renamed: HashMap<String, String> = stats
+        .into_iter()
+        .map(|(top, (counts, years))| {
+            let new = format!("{top} ({})", folder_summary(&counts, years));
+            (top, new)
+        })
+        .collect();
+    for e in entries.iter_mut() {
+        let Some(top) = top_of(&e.path) else { continue };
+        let Some(new) = renamed.get(&top) else {
+            continue;
+        };
+        e.path = format!("{new}{}", &e.path[top.len()..]);
+        if e.path == *new {
+            e.name = new.rsplit('/').next().unwrap_or_default().to_string();
+        }
     }
 }
 
@@ -641,6 +843,60 @@ pub fn sanitize_component(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn found_folders_get_a_descriptive_name() {
+        use super::*;
+        let entry = |path: &str, is_dir: bool, ts: Option<i64>| FileEntry {
+            id: 0,
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            size: 1,
+            is_dir,
+            deleted: true,
+            modified: ts,
+            condition: Condition::Probable,
+            integrity: Integrity::Unchecked,
+            extents: Vec::new(),
+        };
+        let y2019 = 1_560_000_000; // giugno 2019
+        let y2024 = 1_720_000_000; // luglio 2024
+        let mut v = vec![
+            entry("/Struttura precedente/Cartella ritrovata 1", true, None),
+            entry(
+                "/Struttura precedente/Cartella ritrovata 1/Foto",
+                true,
+                None,
+            ),
+            entry(
+                "/Struttura precedente/Cartella ritrovata 1/Foto/a.JPG",
+                false,
+                Some(y2019),
+            ),
+            entry(
+                "/Struttura precedente/Cartella ritrovata 1/Foto/b.jpg",
+                false,
+                Some(y2024),
+            ),
+            entry(
+                "/Struttura precedente/Cartella ritrovata 1/c.mp4",
+                false,
+                None,
+            ),
+            entry("/Struttura precedente/Cartella ritrovata 12", true, None),
+            entry("/Struttura precedente/Vacanze/x.pdf", false, None),
+        ];
+        describe_found_folders(&mut v);
+        let top = "/Struttura precedente/Cartella ritrovata 1 (2 foto, 1 video, 2019-2024)";
+        assert_eq!(v[0].path, top);
+        assert_eq!(
+            v[0].name,
+            "Cartella ritrovata 1 (2 foto, 1 video, 2019-2024)"
+        );
+        assert_eq!(v[3].path, format!("{top}/Foto/b.jpg"));
+        assert_eq!(v[5].name, "Cartella ritrovata 12 (vuota)");
+        assert_eq!(v[6].path, "/Struttura precedente/Vacanze/x.pdf");
+    }
+
     use super::*;
 
     #[test]
