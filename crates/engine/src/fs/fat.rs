@@ -19,6 +19,12 @@ pub fn detect(b: &[u8]) -> Option<FsType> {
     Some(bpb.fs)
 }
 
+/// Byte dall'inizio del volume a dove iniziano i dati (settori riservati,
+/// FAT e radice fissa): solo strutture del file system, nessun contenuto.
+pub(crate) fn metadata_len(boot: &[u8]) -> Option<u64> {
+    Bpb::parse(boot).map(|b| b.data_offset)
+}
+
 #[derive(Clone)]
 struct Bpb {
     fs: FsType,
@@ -107,7 +113,7 @@ struct Fat<'a> {
 
 /// Il blocco sembra un pezzo di elenco FAT (voci da 32 byte plausibili), senza
 /// le voci "." e "..": la continuazione di una directory o della radice.
-fn plausible_entries(d: &[u8]) -> bool {
+pub(crate) fn plausible_entries(d: &[u8]) -> bool {
     let mut valid = 0;
     for e in d.chunks_exact(32).take(16) {
         if e[0] == 0 {
@@ -209,6 +215,34 @@ fn fat_fit(t: &DirTail, frag: &[u8]) -> u8 {
 }
 
 impl Fat<'_> {
+    /// Una voce breve (8.3) che può esistere davvero su questo volume.
+    fn plausible_entry(&self, e: &[u8]) -> bool {
+        if e[11] & 0xC0 != 0 || e[0] == b' ' {
+            return false;
+        }
+        let chars_ok = e[0..11].iter().enumerate().all(|(i, &b)| {
+            (i == 0 && matches!(b, 0xE5 | 0x05))
+                || (b >= 0x20 && !b"\"*+,./:;<=>?[\\]|".contains(&b))
+        });
+        if !chars_ok {
+            return false;
+        }
+        let le16 = |o: usize| u16::from_le_bytes([e[o], e[o + 1]]) as u32;
+        let hi = if self.bpb.fs == FsType::Fat32 {
+            le16(20)
+        } else {
+            0
+        };
+        let cluster = (hi << 16) | le16(26);
+        let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]) as u64;
+        let is_dir = e[11] & 0x10 != 0;
+        let volume = self.bpb.cluster_count as u64 * self.bpb.cluster_size;
+        if cluster == 0 {
+            return size == 0 || is_dir;
+        }
+        self.valid_cluster(cluster) && size <= volume
+    }
+
     /// Elenco di una directory cancellata o ritrovata, senza catena FAT:
     /// cluster contigui finché sembrano continuare l'elenco (al massimo 64).
     /// Ritorna dati, cluster letti e se l'elenco termina lì.
@@ -361,6 +395,12 @@ impl Fat<'_> {
                 continue;
             }
             let deleted = first == 0xE5 || parent_deleted;
+            // Nelle directory ricostruite si leggono anche blocchi che non sono
+            // elenchi veri: si scartano le voci impossibili (caratteri vietati,
+            // attributi o cluster fuori dal volume).
+            if parent_deleted && !self.plausible_entry(e) {
+                continue;
+            }
             let mut short = [0u8; 11];
             short.copy_from_slice(&e[0..11]);
             if short[0] == 0x05 {

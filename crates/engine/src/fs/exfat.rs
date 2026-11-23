@@ -363,7 +363,7 @@ fn set_checksum(set: &[&[u8]]) -> u16 {
 }
 
 /// `true` se il cluster inizia con un entry set di file valido.
-fn starts_with_file_set(data: &[u8]) -> bool {
+pub(crate) fn starts_with_file_set(data: &[u8]) -> bool {
     if data.len() < 96 || !matches!(data[0], 0x85 | 0x05) {
         return false;
     }
@@ -413,7 +413,7 @@ fn exfat_fit(t: &DirTail, frag: &[u8]) -> u8 {
 
 /// Il cluster inizia con la parte finale di un entry set (iniziato nel cluster
 /// precedente dell'elenco) seguita da un entry set completo e valido.
-fn continues_file_sets(data: &[u8]) -> bool {
+pub(crate) fn continues_file_sets(data: &[u8]) -> bool {
     if data.len() < 32 || !matches!(data[0], 0xC0 | 0x40 | 0xC1 | 0x41) {
         return false;
     }

@@ -10,6 +10,7 @@
 pub mod carve;
 pub mod devices;
 pub mod fs;
+pub mod meta;
 pub mod recover;
 pub mod source;
 

@@ -482,7 +482,7 @@ fn folder_summary(counts: &[usize; 5], years: Option<(i64, i64)>) -> String {
 /// Le cartelle di primo livello ritrovate senza nome ("Cartella ritrovata N")
 /// prendono un nome che ne descrive il contenuto, per riconoscerle a colpo
 /// d'occhio: "Cartella ritrovata 2 (48 foto, 3 video, 2024)".
-pub(crate) fn describe_found_folders(entries: &mut [FileEntry]) {
+pub(crate) fn describe_found_folders(entries: &mut Vec<FileEntry>) {
     use std::collections::HashMap;
     let base = format!("{REBUILT_DIR}/Cartella ritrovata ");
     let top_of = |path: &str| -> Option<String> {
@@ -496,7 +496,7 @@ pub(crate) fn describe_found_folders(entries: &mut [FileEntry]) {
     for e in entries.iter() {
         let Some(top) = top_of(&e.path) else { continue };
         let st = stats.entry(top).or_default();
-        if e.is_dir {
+        if e.is_dir || e.name.starts_with("._") {
             continue;
         }
         st.0[kind_of(&e.name)] += 1;
@@ -507,8 +507,16 @@ pub(crate) fn describe_found_folders(entries: &mut [FileEntry]) {
             }
         }
     }
+    // Cartelle senza nessun file (solo voci illeggibili o cartelle vuote): si scartano.
+    let empty: std::collections::HashSet<String> = stats
+        .iter()
+        .filter(|(_, (counts, _))| counts.iter().sum::<usize>() == 0)
+        .map(|(top, _)| top.clone())
+        .collect();
+    entries.retain(|e| top_of(&e.path).map_or(true, |t| !empty.contains(&t)));
     let renamed: HashMap<String, String> = stats
         .into_iter()
+        .filter(|(top, _)| !empty.contains(top))
         .map(|(top, (counts, years))| {
             let new = format!("{top} ({})", folder_summary(&counts, years));
             (top, new)
@@ -655,7 +663,13 @@ pub fn verify_volumes(src: &dyn BlockSource, volumes: &mut [Volume], stop: &dyn 
             if stop() {
                 return;
             }
-            if e.deleted && !e.is_dir && e.condition != Condition::Unsupported {
+            // I file "._nome" sono metadati del Mac (AppleDouble), non il formato
+            // indicato dall'estensione: non si controllano.
+            if e.deleted
+                && !e.is_dir
+                && e.condition != Condition::Unsupported
+                && !e.name.starts_with("._")
+            {
                 e.integrity = verify_entry(src, &snapshot, e);
             }
         }
@@ -883,6 +897,12 @@ mod tests {
                 None,
             ),
             entry("/Struttura precedente/Cartella ritrovata 12", true, None),
+            entry("/Struttura precedente/Cartella ritrovata 13", true, None),
+            entry(
+                "/Struttura precedente/Cartella ritrovata 13/._x.pdf",
+                false,
+                None,
+            ),
             entry("/Struttura precedente/Vacanze/x.pdf", false, None),
         ];
         describe_found_folders(&mut v);
@@ -893,8 +913,9 @@ mod tests {
             "Cartella ritrovata 1 (2 foto, 1 video, 2019-2024)"
         );
         assert_eq!(v[3].path, format!("{top}/Foto/b.jpg"));
-        assert_eq!(v[5].name, "Cartella ritrovata 12 (vuota)");
-        assert_eq!(v[6].path, "/Struttura precedente/Vacanze/x.pdf");
+        // Le cartelle senza file veri (vuote o con soli metadati del Mac) spariscono.
+        assert_eq!(v.len(), 6);
+        assert_eq!(v[5].path, "/Struttura precedente/Vacanze/x.pdf");
     }
 
     use super::*;

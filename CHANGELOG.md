@@ -2,6 +2,20 @@
 
 Le versioni seguono il [versionamento semantico](https://semver.org/lang/it/).
 
+## [0.1.2] — 2026-11-23
+
+### Diagnosi
+- Nuovo comando `sectora meta <disco> <file>`: salva solo le strutture del file system (nomi,
+  dimensioni, cartelle; nessun contenuto dei file), da allegare a una segnalazione.
+  `scripts/meta-to-img.py` ne ricostruisce un'immagine "vuota" su cui riprodurre la scansione.
+
+### Recupero
+- Le directory ricostruite scartano le voci impossibili (caratteri vietati, cluster o dimensioni
+  fuori dal volume): niente più cartelle piene di nomi illeggibili lette da blocchi di dati.
+- Le "Cartella ritrovata" senza nessun file vero vengono scartate.
+- I file `._nome` creati dal Mac non vengono più controllati come se fossero del formato
+  dell'estensione (prima risultavano "Danneggiato") e non contano nella descrizione delle cartelle.
+
 ## [0.1.1] — 2026-11-23
 
 ### Recupero dopo una formattazione (FAT32 ed exFAT)
@@ -52,5 +66,6 @@ Prima versione pubblica.
 - Su macOS i dischi fisici richiedono `sudo`.
 - APFS, HFS+ ed ext4 solo con la ricerca per firma.
 
+[0.1.2]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.2
 [0.1.1]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.1
 [0.1.0]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.0

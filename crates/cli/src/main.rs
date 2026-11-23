@@ -83,6 +83,13 @@ enum Command {
         #[command(flatten)]
         filter: EntryFilter,
     },
+    /// Salva solo le strutture del file system (nomi, dimensioni, cartelle; nessun
+    /// contenuto dei file) in un file da allegare a una segnalazione.
+    Meta {
+        source: PathBuf,
+        /// File da creare (non viene mai sovrascritto).
+        output: PathBuf,
+    },
     /// Tipi di file supportati dal Deep Scan.
     Types,
 }
@@ -171,6 +178,7 @@ fn run() -> Result<()> {
             out,
             filter,
         } => cmd_restore(source, out, filter),
+        Command::Meta { source, output } => cmd_meta(source, output),
         Command::Types => {
             for k in FileKind::ALL {
                 println!("{:<6} {}", k.extension(), k.category());
@@ -382,6 +390,43 @@ fn cmd_image(source: PathBuf, output: PathBuf) -> Result<()> {
             report.bad_ranges.len()
         );
     }
+    Ok(())
+}
+
+fn cmd_meta(source: PathBuf, output: PathBuf) -> Result<()> {
+    let src = open(&source)?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    check_destination(&src, &parent)?;
+    eprintln!(
+        "Strutture di {} ({}) in {}: solo nomi e cartelle, nessun contenuto dei file.",
+        src.describe(),
+        human(src.size()),
+        output.display()
+    );
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output)?;
+    let mut out = std::io::BufWriter::new(file);
+    let mut progress = Progress::new();
+    let report = sectora_engine::meta::dump_metadata(&src, &mut out, |pos, total| {
+        progress.update(pos, total, 0)
+    })?;
+    eprintln!();
+    eprintln!(
+        "Completato: {} di strutture in {} blocchi{}.",
+        human(report.bytes),
+        report.records,
+        if report.unreadable > 0 {
+            format!(", {} illeggibili saltati", human(report.unreadable))
+        } else {
+            String::new()
+        }
+    );
     Ok(())
 }
 

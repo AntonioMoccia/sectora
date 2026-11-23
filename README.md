@@ -66,8 +66,8 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 2. Apri **PowerShell come amministratore** (Start → digita `powershell` → tasto destro →
    *Esegui come amministratore*) ed estrai lo zip in `C:\Sectora`:
    ```powershell
-   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.1.1-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
-   cd C:\Sectora\sectora-cli-v0.1.1-windows-x86_64
+   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.1.2-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
+   cd C:\Sectora\sectora-cli-v0.1.2-windows-x86_64
    .\sectora.exe devices
    ```
    Se lo zip è altrove: tasto destro sullo zip → *Copia come percorso* e incollalo al posto del primo
@@ -96,10 +96,10 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 
 ```sh
 cd ~/Downloads
-tar xzf sectora-cli-v0.1.1-macos-universal.tar.gz
-xattr -d com.apple.quarantine sectora-cli-v0.1.1-macos-universal/sectora
+tar xzf sectora-cli-v0.1.2-macos-universal.tar.gz
+xattr -d com.apple.quarantine sectora-cli-v0.1.2-macos-universal/sectora
 sudo mkdir -p /usr/local/bin
-sudo mv sectora-cli-v0.1.1-macos-universal/sectora /usr/local/bin/
+sudo mv sectora-cli-v0.1.2-macos-universal/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -132,8 +132,8 @@ apri un'immagine creata con la riga di comando.
 **Riga di comando** (binario statico: funziona su qualsiasi distribuzione)
 
 ```sh
-tar xzf sectora-cli-v0.1.1-linux-x86_64.tar.gz
-sudo install sectora-cli-v0.1.1-linux-x86_64/sectora /usr/local/bin/
+tar xzf sectora-cli-v0.1.2-linux-x86_64.tar.gz
+sudo install sectora-cli-v0.1.2-linux-x86_64/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -182,6 +182,7 @@ originale e recupera: otterrai la struttura com'era. Se la cartella principale a
 | `sectora carve <disco> --out <cartella>` | Ricerca per firma e recupero |
 | `sectora image <disco> copia.img` | Copia bit per bit del disco, su cui poi lavorare |
 | `sectora types` | Formati riconosciuti dalla ricerca per firma |
+| `sectora meta <disco> strutture.meta` | Solo strutture delle cartelle, senza contenuti, per segnalare un problema |
 
 Opzioni di `quick` e `restore`: `--path <testo>` filtra per percorso, `--all` include anche i file
 sovrascritti, `--rebuild` ricostruisce dopo una formattazione. `quick`, `scan` e `devices` accettano
@@ -357,6 +358,16 @@ Arch: `sudo pacman -S webkit2gtk-4.1 gtk3 librsvg libappindicator-gtk3 base-deve
 
 Se il problema non è qui, apri una [segnalazione](https://github.com/AntonioMoccia/sectora/issues)
 indicando sistema operativo, comando eseguito e messaggio completo.
+
+**Cartelle ricostruite male?** Allega alla segnalazione le strutture del disco:
+
+```sh
+sectora meta <disco> strutture.meta
+```
+
+Il file contiene solo nomi, dimensioni e posizioni di file e cartelle, **nessun contenuto**, ed è di
+solito grande pochi MB (comprimilo in zip prima di allegarlo). Con quello lo sviluppatore ricostruisce
+una copia vuota del disco e riproduce il problema.
 
 ---
 
