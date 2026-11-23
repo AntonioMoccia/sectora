@@ -585,6 +585,30 @@ impl State {
         }
     }
 
+    /// Voci provvisorie per l'anteprima in tempo reale: l'albero dai record
+    /// raccolti finora (i record contengono già nome e cartella madre).
+    pub(crate) fn live_entries(&self) -> Vec<FileEntry> {
+        if self.foreign {
+            if !self.old.contains_key(&ROOT) && self.old.len() < 8 {
+                return Vec::new();
+            }
+            let (cs, base) = self.foreign_geometry();
+            return build_entries(
+                &self.old,
+                cs,
+                &|_| false,
+                Some((super::REBUILT_NTFS_DIR, base)),
+            );
+        }
+        let allocated = |lcn: u64| is_allocated(self.bitmap.as_deref(), lcn);
+        build_entries(
+            &self.old,
+            self.cluster_size,
+            &allocated,
+            Some((super::REBUILT_DIR, 0)),
+        )
+    }
+
     pub(crate) fn finish(self, _view: &dyn BlockSource) -> Vec<FileEntry> {
         if self.foreign {
             // Un volume FAT/exFAT contiene anche record "FILE" per caso solo raramente:

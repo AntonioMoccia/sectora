@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ScanMode, ScanProgress, SourceInfo } from "./api";
 import { bytes } from "./format";
+import { PHASE_TITLES, determinate as isDeterminate, progressLine, useSpeed } from "./ScanStatus";
 
 const TYPES = [
   { id: "jpg", label: "JPEG" },
@@ -54,20 +55,15 @@ export function ScanView({ source, progress, running, onStart, onCancel, onBack 
     setKinds(next);
   };
 
+  const speed = useSpeed(progress);
   if (running) {
     const phase = progress?.phase ?? "quick";
-    const determinate = phase === "deep" || phase === "rebuild" || phase === "verify";
+    const determinate = isDeterminate(progress);
     const pct = progress && progress.total > 0 ? (progress.position / progress.total) * 100 : 0;
-    const titles: Record<string, string> = {
-      quick: "Lettura del file system",
-      deep: "Lettura completa del disco",
-      rebuild: "Ricostruzione della struttura delle cartelle",
-      verify: "Verifica dei file trovati",
-    };
     return (
       <div className="page narrow">
         <header className="page-head">
-          <h1>{titles[phase]}</h1>
+          <h1>{PHASE_TITLES[phase]}</h1>
           <p className="muted mono small">{source.path}</p>
         </header>
         <div className="progress-block">
@@ -78,26 +74,9 @@ export function ScanView({ source, progress, running, onStart, onCancel, onBack 
             />
           </div>
           <div className="progress-stats">
-            {phase === "deep" || phase === "rebuild" ? (
-              <>
-                <span>
-                  {pct.toFixed(1)}% · {bytes(progress?.position)} di {bytes(progress?.total)}
-                </span>
-                <span>
-                  {phase === "deep"
-                    ? `${progress?.found ?? 0} file trovati per firma · cartelle precedenti in ricostruzione`
-                    : "ricerca delle cartelle precedenti a una formattazione"}
-                </span>
-              </>
-            ) : phase === "verify" ? (
-              <span>
-                {progress?.position.toLocaleString("it-IT")} di {progress?.total.toLocaleString("it-IT")} file
-                cancellati controllati
-              </span>
-            ) : (
-              <span>Analisi delle tabelle del disco…</span>
-            )}
+            <span>{progressLine(progress, speed)}</span>
           </div>
+          <p className="muted small">I risultati compariranno qui appena disponibili, mentre la scansione continua.</p>
         </div>
         <div className="actions">
           <button className="secondary" onClick={onCancel}>

@@ -3,6 +3,7 @@
 
 pub mod exfat;
 pub mod fat;
+pub(crate) mod live;
 pub mod ntfs;
 pub mod partition;
 
@@ -316,14 +317,70 @@ pub fn quick_scan(src: &dyn BlockSource) -> Vec<Volume> {
 /// Quick Scan con opzioni. Per seguire l'avanzamento della ricostruzione o
 /// interromperla usare [`scan_volumes`], [`rebuild_pass`] e [`verify_volumes`].
 pub fn scan_all(src: &dyn BlockSource, opts: ScanOptions) -> Vec<Volume> {
+    scan_all_with(src, opts, |_, _, _| {})
+}
+
+/// Fase di `scan_all_with`, per mostrare l'avanzamento.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPhase {
+    /// Lettura completa del disco (byte letti, totale).
+    Rebuild,
+    /// Unione delle cartelle ritrovate (nessuna misura: letture sparse).
+    Finalize,
+    /// Verifica dei file cancellati (file controllati, totale).
+    Verify,
+}
+
+/// Come `scan_all`, segnalando l'avanzamento di ogni fase: su dischi grandi la
+/// lettura completa dura ore.
+pub fn scan_all_with(
+    src: &dyn BlockSource,
+    opts: ScanOptions,
+    mut on_progress: impl FnMut(ScanPhase, u64, u64),
+) -> Vec<Volume> {
     let mut volumes = scan_volumes(src);
     if opts.rebuild {
-        rebuild_pass(src, &mut volumes, |_, _| crate::carve::Flow::Continue);
+        let carve_opts = crate::carve::CarveOptions {
+            detect: false,
+            ..Default::default()
+        };
+        crate::carve::carve_with(
+            src,
+            &carve_opts,
+            |ev| {
+                if let crate::carve::Event::Progress { position, total } = ev {
+                    on_progress(ScanPhase::Rebuild, *position, *total);
+                }
+                crate::carve::Flow::Continue
+            },
+            &mut |abs, chunk| feed_rebuild(src, &mut volumes, abs, chunk),
+        );
+        on_progress(ScanPhase::Finalize, 0, 0);
+        finish_rebuild(src, &mut volumes);
     }
     if opts.verify {
-        verify_volumes(src, &mut volumes, &|| false);
+        let total = volumes
+            .iter()
+            .flat_map(|v| &v.entries)
+            .filter(|e| needs_verify(e))
+            .count() as u64;
+        let mut done = 0u64;
+        for vol in volumes.iter_mut() {
+            let snapshot = vol.clone_meta();
+            for e in vol.entries.iter_mut().filter(|e| needs_verify(e)) {
+                e.integrity = verify_entry(src, &snapshot, e);
+                done += 1;
+                on_progress(ScanPhase::Verify, done, total);
+            }
+        }
     }
     volumes
+}
+
+/// File cancellato da verificare. I file "._nome" sono metadati del Mac
+/// (AppleDouble), non il formato indicato dall'estensione: non si controllano.
+fn needs_verify(e: &FileEntry) -> bool {
+    e.deleted && !e.is_dir && e.condition != Condition::Unsupported && !e.name.starts_with("._")
 }
 
 /// Legge le tabelle delle partizioni e il file system di ogni volume (veloce).
@@ -416,9 +473,42 @@ pub fn feed_rebuild(src: &dyn BlockSource, volumes: &mut [Volume], abs: u64, chu
     }
 }
 
+/// Anteprima della ricostruzione in corso: per ogni volume, le voci provvisorie
+/// ricavate dagli elenchi e dai record letti finora. Non legge il disco.
+/// A fine lettura `finish_rebuild` le sostituisce con quelle definitive.
+pub fn live_rebuild(volumes: &[Volume]) -> Vec<Vec<FileEntry>> {
+    volumes
+        .iter()
+        .map(|vol| {
+            let mut out = match vol.state.as_ref() {
+                Some(FsState::Fat(s)) => s.live_entries(),
+                Some(FsState::ExFat(s)) => s.live_entries(),
+                Some(FsState::Ntfs(s)) => s.live_entries(),
+                None => Vec::new(),
+            };
+            if let Some(FsState::Ntfs(s)) = vol.foreign.as_ref() {
+                out.extend(s.live_entries());
+            }
+            out
+        })
+        .collect()
+}
+
 /// Conclude la ricostruzione: aggiunge ai volumi le voci ritrovate.
 pub fn finish_rebuild(src: &dyn BlockSource, volumes: &mut [Volume]) {
-    for vol in volumes.iter_mut() {
+    finish_rebuild_with(src, volumes, |_, _| {});
+}
+
+/// Come `finish_rebuild`, segnalando l'avanzamento (volumi completati, totale):
+/// su dischi grandi la ricostruzione finale legge migliaia di blocchi sparsi.
+pub fn finish_rebuild_with(
+    src: &dyn BlockSource,
+    volumes: &mut [Volume],
+    mut on_progress: impl FnMut(u64, u64),
+) {
+    let total = volumes.len() as u64;
+    for (n, vol) in volumes.iter_mut().enumerate() {
+        on_progress(n as u64, total);
         let view = SubSource::new(src, vol.offset, vol.size);
         let found = match vol.state.take() {
             Some(FsState::Fat(s)) => s.finish(&view),
@@ -433,6 +523,7 @@ pub fn finish_rebuild(src: &dyn BlockSource, volumes: &mut [Volume]) {
             vol.entries.extend(s.finish(&view));
         }
     }
+    on_progress(total, total);
 }
 
 /// Anno (calendario civile) di un istante Unix.

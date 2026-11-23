@@ -12,6 +12,17 @@ export function bytes(n: number | null | undefined): string {
   return u === 0 ? `${n} B` : `${v.toFixed(v < 10 ? 1 : 0)} ${units[u]}`;
 }
 
+/** Durata leggibile: "2 h 15 min", "12 min", "45 s". */
+export function duration(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return `${h} h ${String(m % 60).padStart(2, "0")} min`;
+}
+
 /**
  * NTFS salva le date in UTC: si convertono nel fuso locale. FAT ed exFAT le salvano già
  * in ora locale del dispositivo: si mostrano così come sono (fuso UTC = nessuna conversione).

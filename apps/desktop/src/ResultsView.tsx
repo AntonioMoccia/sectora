@@ -5,6 +5,10 @@ import { bytes, categories, conditionInfo, date, integrityInfo } from "./format"
 interface Props {
   /** Cambia a ogni nuova scansione: invalida tutte le cache. */
   scanId: number;
+  /** Aumenta a ogni aggiornamento dei risultati durante la scansione. */
+  liveVersion: number;
+  /** Scansione in corso: risultati parziali, recupero disattivato. */
+  scanning: boolean;
   onRecover: (sel: Selection, count: number) => void;
   onNewScan: () => void;
 }
@@ -221,7 +225,7 @@ function PreviewPane({ item }: { item: Item | null }) {
 
 const emptySelection: Selection = { all: null, include: [], exclude: [] };
 
-export function ResultsView({ scanId, onRecover, onNewScan }: Props) {
+export function ResultsView({ scanId, liveVersion, scanning, onRecover, onNewScan }: Props) {
   const [query, setQuery] = useState<Query>({
     only_deleted: true,
     category: "all",
@@ -289,6 +293,28 @@ export function ResultsView({ scanId, onRecover, onNewScan }: Props) {
     [query],
   );
 
+  // Nuovi risultati durante la scansione: si ricarica la parte visibile senza
+  // tornare in cima e senza perdere la selezione.
+  useEffect(() => {
+    if (liveVersion === 0) return;
+    api.volumes().then(setVolumes);
+    queryId.current += 1;
+    const id = queryId.current;
+    loading.current.clear();
+    const offset = Math.floor((tableRef.current?.scrollTop ?? 0) / ROW);
+    const page = Math.floor(offset / PAGE);
+    api.query(query, page * PAGE, PAGE).then((res) => {
+      if (id !== queryId.current) return;
+      setTotal(res.total);
+      setCounts(res.counts);
+      setDeletedTotal(res.deleted_total);
+      const next = new Map<number, Item>();
+      res.rows.forEach((r, i) => next.set(res.offset + i, r));
+      setRows(next);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveVersion]);
+
   // Nuova query: si riparte dalla prima pagina.
   useEffect(() => {
     queryId.current += 1;
@@ -302,7 +328,7 @@ export function ResultsView({ scanId, onRecover, onNewScan }: Props) {
   // Albero: le radici dipendono da filtri e categoria, non dalla cartella scelta.
   const treeQuery = useMemo(() => ({ ...query, node: null }), [query]);
   const [renames, setRenames] = useState(0);
-  const treeVersion = `${scanId}|${renames}|${query.only_deleted}|${query.category}|${query.text}`;
+  const treeVersion = `${scanId}|${liveVersion}|${renames}|${query.only_deleted}|${query.category}|${query.text}`;
   const renameFolder = useCallback(
     async (id: string, name: string) => {
       const newId = await api.renameFolder(id, name);
@@ -513,7 +539,8 @@ export function ResultsView({ scanId, onRecover, onNewScan }: Props) {
           </span>
           <button
             className="primary"
-            disabled={selInfo.count === 0}
+            disabled={selInfo.count === 0 || scanning}
+            title={scanning ? "Il recupero si attiva alla fine della scansione" : undefined}
             onClick={() => onRecover(selection, selInfo.count)}
           >
             Recupera {selInfo.count > 0 ? `${selInfo.count.toLocaleString("it-IT")} file (${bytes(selInfo.size)})` : "…"}

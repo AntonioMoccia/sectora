@@ -8,6 +8,7 @@ import {
   type ScanDone,
   type ScanMode,
   type ScanProgress,
+  type ScanUpdate,
   type Selection,
   type SourceInfo,
 } from "./api";
@@ -15,6 +16,7 @@ import { SourcePicker } from "./SourcePicker";
 import { ScanView } from "./ScanView";
 import { ResultsView } from "./ResultsView";
 import { bytes } from "./format";
+import { LiveBanner } from "./ScanStatus";
 
 type Step = "source" | "scan" | "results";
 
@@ -26,14 +28,23 @@ export default function App() {
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [scanId, setScanId] = useState(0);
   const [summary, setSummary] = useState<ScanDone | null>(null);
+  const [update, setUpdate] = useState<ScanUpdate | null>(null);
+  const [liveVersion, setLiveVersion] = useState(0);
   const [recovering, setRecovering] = useState<RecoverProgress | null>(null);
   const [recovered, setRecovered] = useState<RecoverDone | null>(null);
 
   useEffect(() => {
     const subs = [
       onEvent<ScanProgress>("scan-progress", setProgress),
+      onEvent<ScanUpdate>("scan-update", (u) => {
+        // Risultati parziali: si mostrano subito, la scansione continua.
+        setUpdate(u);
+        setLiveVersion((n) => n + 1);
+        setStep("results");
+      }),
       onEvent<ScanDone>("scan-done", (done) => {
         setSummary(done);
+        setUpdate(null);
         setScanId((n) => n + 1);
         setRunning(false);
         setStep("results");
@@ -61,6 +72,8 @@ export default function App() {
 
   const startScan = async (mode: ScanMode, kinds: string[]) => {
     setProgress(null);
+    setUpdate(null);
+    setSummary(null);
     setRunning(true);
     try {
       await api.startScan(mode, kinds);
@@ -123,12 +136,20 @@ export default function App() {
             onBack={() => setStep("source")}
           />
         )}
-        {step === "results" && scanId > 0 && (
+        {step === "results" && (scanId > 0 || running) && (
           <>
-            {summary?.cancelled && (
+            {running && <LiveBanner progress={progress} update={update} onCancel={() => api.cancel()} />}
+            {!running && summary?.cancelled && (
               <div className="alert warn banner">Scansione interrotta: i risultati possono essere incompleti.</div>
             )}
-            <ResultsView scanId={scanId} onRecover={recover} onNewScan={() => setStep("scan")} />
+            <ResultsView
+              key={running ? `live-${scanId}` : `final-${scanId}`}
+              scanId={scanId}
+              liveVersion={running ? liveVersion : 0}
+              scanning={running}
+              onRecover={recover}
+              onNewScan={() => setStep("scan")}
+            />
           </>
         )}
       </div>

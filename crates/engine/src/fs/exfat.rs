@@ -193,7 +193,8 @@ impl ExFat<'_> {
             }
             i += 1;
         }
-        if let Some((last, missing)) = tail {
+        // Solo le cartelle incomplete possono ricevere blocchi ritrovati.
+        if let Some((last, missing)) = tail.filter(|t| t.1 > 0) {
             let mut t = DirTail::new(
                 parent,
                 last,
@@ -396,6 +397,53 @@ fn exfat_first_name(d: &[u8]) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Elenco di un blocco di directory exFAT per l'anteprima in tempo reale, e i
+/// primi cluster che le sue voci indicano (per riconoscere le sottocartelle).
+pub(crate) fn listing(d: &[u8]) -> (Vec<super::live::LiveItem>, Vec<u32>) {
+    let entries: Vec<&[u8]> = d.chunks_exact(32).collect();
+    let (mut items, mut refs) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < entries.len() {
+        let e = entries[i];
+        if e[0] == 0 {
+            break;
+        }
+        if matches!(e[0], 0xC0 | 0x40) {
+            refs.push(u32::from_le_bytes(e[20..24].try_into().unwrap()));
+        }
+        let secondary = e[1] as usize;
+        if matches!(e[0], 0x85 | 0x05) && secondary >= 2 && i + secondary < entries.len() {
+            let stream = entries[i + 1];
+            if matches!(stream[0], 0xC0 | 0x40) {
+                refs.push(u32::from_le_bytes(stream[20..24].try_into().unwrap()));
+                let mut name = Vec::new();
+                for n in &entries[i + 2..=i + secondary] {
+                    if n[0] & 0x7F != 0x41 {
+                        break;
+                    }
+                    name.extend_from_slice(&n[2..32]);
+                }
+                name.truncate(stream[3] as usize * 2);
+                let name = utf16le(&name);
+                let ts = u32::from_le_bytes(e[12..16].try_into().unwrap());
+                if !name.is_empty() {
+                    items.push(super::live::LiveItem {
+                        name,
+                        is_dir: u16::from_le_bytes([e[4], e[5]]) & 0x10 != 0,
+                        cluster: u32::from_le_bytes(stream[20..24].try_into().unwrap()),
+                        size: u64::from_le_bytes(stream[24..32].try_into().unwrap()),
+                        modified: dos_datetime((ts >> 16) as u16, ts as u16),
+                    });
+                }
+            }
+            i += secondary + 1;
+            continue;
+        }
+        i += 1;
+    }
+    (items, refs)
+}
+
 /// Quanto il blocco `frag` continua l'elenco di `t` (vedi `fragment_owner`).
 fn exfat_fit(t: &DirTail, frag: &[u8]) -> u8 {
     let starts_clean = frag.first().is_some_and(|b| matches!(b, 0x85 | 0x05));
@@ -433,26 +481,19 @@ impl ExFat<'_> {
     /// referenziati da altri sono le cartelle di primo livello (il loro nome stava
     /// nella radice, sovrascritta) oppure i blocchi successivi dell'elenco di una
     /// cartella già ricostruita: questi vengono riattaccati alla cartella giusta.
-    fn rebuild_orphans(&mut self, mut candidates: Vec<u32>) {
+    fn rebuild_orphans(
+        &mut self,
+        mut candidates: Vec<u32>,
+        mut referenced: HashSet<u32>,
+        unparsed: Vec<u32>,
+    ) {
         candidates.retain(|c| !self.visited.contains(c));
         candidates.sort_unstable();
         candidates.dedup();
-        let cs = self.g.cluster_size as usize;
-        let mut referenced = HashSet::new();
-        for &c in &candidates {
-            let off = self.cluster_offset(c);
-            let mut data = vec![0u8; cs];
-            if self.r.read(off, &mut data).is_none() {
-                continue;
-            }
-            for e in data.chunks_exact(32) {
-                if e[0] == 0 {
-                    break;
-                }
-                if matches!(e[0], 0xC0 | 0x40) {
-                    referenced.insert(u32::from_le_bytes(e[20..24].try_into().unwrap()));
-                }
-            }
+        // Solo i blocchi che non erano interi nella porzione letta si rileggono.
+        for c in unparsed {
+            let data = self.read_clusters(&[c]);
+            referenced.extend(listing(&data).1);
         }
         self.dir_starts.extend(referenced.iter().copied());
         // In ordine di posizione sul disco, cioè di scrittura: la cartella a cui
@@ -477,9 +518,8 @@ impl ExFat<'_> {
             if let Some(i) =
                 fragment_owner(&self.tails, top, first.as_deref(), |t| exfat_fit(t, &data))
             {
-                let owner = &mut self.tails[i];
+                let mut owner = self.tails.swap_remove(i);
                 let rest = owner.missing.saturating_sub(clusters.len() as u32);
-                owner.missing = 0;
                 let path = owner.path.clone();
                 let mut joined = std::mem::take(&mut owner.pending);
                 joined.extend_from_slice(&data);
@@ -518,6 +558,12 @@ pub(crate) struct State {
     bitmap: Option<Vec<u8>>,
     candidates: Vec<u32>,
     tails: Vec<DirTail>,
+    /// Primi cluster indicati dagli elenchi candidati (sottocartelle): raccolti
+    /// durante la lettura, senza rileggere i blocchi alla fine.
+    referenced: HashSet<u32>,
+    /// Candidati il cui blocco non era tutto nella porzione letta: da rileggere.
+    unparsed: Vec<u32>,
+    live: super::live::LiveTree,
 }
 
 impl State {
@@ -538,21 +584,38 @@ impl State {
             }
             let i = (off - rel) as usize;
             let want = HEAD.min(cs as usize);
-            let mut tmp = vec![0u8; want];
+            let mut tmp = [0u8; HEAD];
             let head: &[u8] = if i + want <= chunk.len() {
                 &chunk[i..i + want]
-            } else if crate::source::read_exact_at(view, off, &mut tmp).is_ok() {
-                &tmp
+            } else if crate::source::read_exact_at(view, off, &mut tmp[..want]).is_ok() {
+                &tmp[..want]
             } else {
                 &[]
             };
-            if !self.visited.contains(&c)
-                && (starts_with_file_set(head) || continues_file_sets(head))
-            {
+            let first = starts_with_file_set(head);
+            if !self.visited.contains(&c) && (first || continues_file_sets(head)) {
                 self.candidates.push(c);
+                if i + cs as usize <= chunk.len() {
+                    let (items, refs) = listing(&chunk[i..i + cs as usize]);
+                    self.referenced.extend(refs);
+                    if first {
+                        self.live.add(c, None, items);
+                    }
+                } else {
+                    self.unparsed.push(c);
+                }
             }
             k += 1;
         }
+    }
+
+    /// Voci provvisorie per l'anteprima in tempo reale.
+    pub(crate) fn live_entries(&self) -> Vec<FileEntry> {
+        self.live.entries(
+            self.g.heap_offset,
+            self.g.cluster_size,
+            self.g.cluster_count,
+        )
     }
 
     pub(crate) fn finish(self, view: &dyn BlockSource) -> Vec<FileEntry> {
@@ -567,7 +630,7 @@ impl State {
             tails: self.tails,
             dir_starts: HashSet::new(),
         };
-        fs.rebuild_orphans(self.candidates);
+        fs.rebuild_orphans(self.candidates, self.referenced, self.unparsed);
         fs.entries
     }
 }
@@ -621,7 +684,31 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
         bitmap: fs.bitmap.take(),
         candidates: Vec::new(),
         tails: std::mem::take(&mut fs.tails),
+        referenced: HashSet::new(),
+        unparsed: Vec::new(),
+        live: Default::default(),
     }));
     vol.entries = fs.entries;
     Ok(())
+}
+
+#[cfg(test)]
+mod listing_tests {
+    #[test]
+    fn listing_reports_subfolder_clusters() {
+        // Entry set: file (0x85, 2 secondarie), stream (0xC0) con primo cluster 77, nome "A".
+        let mut d = vec![0u8; 96];
+        d[0] = 0x85;
+        d[1] = 2;
+        d[4] = 0x10; // cartella
+        d[32] = 0xC0;
+        d[35] = 1;
+        d[52..56].copy_from_slice(&77u32.to_le_bytes());
+        d[64] = 0xC1;
+        d[66] = b'A';
+        let (items, refs) = super::listing(&d);
+        assert_eq!(refs, vec![77]);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_dir && items[0].name == "A" && items[0].cluster == 77);
+    }
 }

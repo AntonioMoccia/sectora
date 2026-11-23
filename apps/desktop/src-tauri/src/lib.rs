@@ -9,8 +9,8 @@ use base64::Engine as _;
 use sectora_engine::carve::{carve_with, CarveOptions, Event, FileKind, Flow, Found};
 use sectora_engine::devices::{list_devices as engine_devices, DeviceInfo};
 use sectora_engine::fs::{
-    feed_rebuild, finish_rebuild, read_prefix, scan_volumes, verify_entry, Condition, Extent,
-    FileEntry, FsType, Integrity, Volume,
+    feed_rebuild, finish_rebuild_with, live_rebuild, read_prefix, scan_volumes, verify_entry,
+    Condition, Extent, FileEntry, FsType, Integrity, Volume,
 };
 use sectora_engine::source::{read_exact_at, BlockSource, ReadOnlySource};
 use sectora_engine::{check_destination, recover_entry, recover_file};
@@ -61,6 +61,17 @@ struct ScanProgress {
     position: u64,
     total: u64,
     found: usize,
+}
+
+/// Risultati parziali pubblicati durante la scansione: il frontend li consulta
+/// con le stesse query dei risultati finali.
+#[derive(Serialize, Clone)]
+struct ScanUpdate {
+    files: usize,
+    deleted: usize,
+    carved: usize,
+    /// Le cartelle ricostruite sono provvisorie (si sistemano a fine lettura).
+    provisional: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -434,6 +445,53 @@ fn open_source(path: String, state: State<AppState>) -> Result<SourceInfo, Strin
 ///
 /// "both" legge il disco una sola volta: durante il Deep Scan gli stessi blocchi
 /// alimentano la ricostruzione delle strutture precedenti a una formattazione.
+/// Pubblica un'istantanea dei risultati durante la scansione: i comandi di
+/// consultazione (query, albero, anteprima) la usano subito.
+fn publish(
+    state: &AppState,
+    app: &AppHandle,
+    volumes: Vec<Volume>,
+    carved: Vec<Found>,
+    provisional: bool,
+) {
+    let items = build_items(&volumes, &carved);
+    let files = items.iter().filter(|i| i.volume.is_some()).count();
+    let deleted = volumes
+        .iter()
+        .flat_map(|v| &v.entries)
+        .filter(|e| !e.is_dir && e.deleted)
+        .count();
+    let update = ScanUpdate {
+        files,
+        deleted,
+        carved: carved.len(),
+        provisional,
+    };
+    {
+        let mut inner = state.inner.lock().unwrap();
+        inner.volumes = Arc::new(volumes);
+        inner.carved = Arc::new(carved);
+        inner.items = Arc::new(items);
+        inner.cache = None;
+    }
+    let _ = app.emit("scan-update", update);
+}
+
+/// Volumi con le voci definitive più quelle provvisorie della ricostruzione.
+fn with_live(volumes: &[Volume]) -> Vec<Volume> {
+    let live = live_rebuild(volumes);
+    volumes
+        .iter()
+        .zip(live)
+        .map(|(v, extra)| {
+            let mut m = v.clone_meta();
+            m.entries = v.entries.clone();
+            m.entries.extend(extra);
+            m
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn start_scan(
     mode: String,
@@ -477,11 +535,12 @@ fn start_scan(
         };
         let stopped = || cancel.load(Ordering::SeqCst);
 
-        // 1. File system (veloce: tabelle e metadati).
+        // 1. File system (veloce: tabelle e metadati). I file trovati si vedono subito.
         let mut volumes = Vec::new();
         if mode == "quick" || mode == "both" {
             emit("quick", 0, total, 0);
             volumes = scan_volumes(src);
+            publish(&state, &app, with_live(&volumes), Vec::new(), false);
         }
 
         // 2. Lettura completa: Deep Scan e/o ricostruzione nella stessa passata.
@@ -496,7 +555,12 @@ fn start_scan(
             };
             let phase = if deep { "deep" } else { "rebuild" };
             let mut last = Instant::now() - Duration::from_secs(1);
-            let mut found = 0usize;
+            // File trovati per firma finora: condivisi con la pubblicazione dei risultati.
+            let found_live = std::cell::RefCell::new(Vec::<Found>::new());
+            // Pubblicazione dei risultati parziali: intervallo adattivo, almeno 2 s e
+            // dieci volte il tempo impiegato a prepararli (dischi con milioni di file).
+            let mut next_publish = Instant::now() + Duration::from_secs(2);
+            let mut interval = Duration::from_secs(2);
             carved = carve_with(
                 src,
                 &opts,
@@ -505,10 +569,10 @@ fn start_scan(
                         Event::Progress { position, total } => {
                             if last.elapsed() > Duration::from_millis(150) || position >= total {
                                 last = Instant::now();
-                                emit(phase, *position, *total, found);
+                                emit(phase, *position, *total, found_live.borrow().len());
                             }
                         }
-                        Event::Found(_) => found += 1,
+                        Event::Found(f) => found_live.borrow_mut().push(f.clone()),
                         Event::ReadError { .. } => {}
                     }
                     if stopped() {
@@ -521,10 +585,25 @@ fn start_scan(
                     if rebuild {
                         feed_rebuild(src, &mut volumes, abs, chunk)
                     }
+                    if Instant::now() >= next_publish {
+                        let t = Instant::now();
+                        let snapshot = if rebuild {
+                            with_live(&volumes)
+                        } else {
+                            volumes.clone()
+                        };
+                        publish(&state, &app, snapshot, found_live.borrow().clone(), rebuild);
+                        interval = (t.elapsed() * 10).max(Duration::from_secs(2));
+                        next_publish = Instant::now() + interval;
+                    }
                 },
             );
             if rebuild {
-                finish_rebuild(src, &mut volumes);
+                // Fase finale: unione dei blocchi ritrovati, letture sparse.
+                emit("finalize", 0, 0, carved.len());
+                finish_rebuild_with(src, &mut volumes, |done, total| {
+                    emit("finalize", done, total, 0)
+                });
             }
         }
 
@@ -541,6 +620,9 @@ fn start_scan(
             })
             .collect();
         carved.retain(|f| !known.contains(&f.offset));
+
+        // Struttura definitiva visibile subito; la verifica aggiorna gli stati dopo.
+        publish(&state, &app, volumes.clone(), carved.clone(), false);
 
         // 3. Verifica del contenuto dei file cancellati.
         let to_check: usize = volumes
@@ -855,6 +937,9 @@ fn recover(
     state: State<AppState>,
 ) -> Result<(), String> {
     let src = source(&state)?;
+    if state.inner.lock().unwrap().busy {
+        return Err("Attendi la fine della scansione: i risultati sono ancora provvisori.".into());
+    }
     let dest = PathBuf::from(dest);
     check_destination(&src, &dest).map_err(|e| e.to_string())?;
     let (volumes, carved, items) = {

@@ -682,3 +682,32 @@ input {
 .placeholder {
   grid-column: 2 / -1;
 }
+
+/* Scansione in corso sopra i risultati */
+.live-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.live-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.live-head .muted {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar.thin {
+  height: 4px;
+}
+.small-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+}

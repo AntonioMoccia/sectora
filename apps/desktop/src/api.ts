@@ -20,10 +20,19 @@ export interface SourceInfo {
 }
 
 export interface ScanProgress {
-  phase: "quick" | "rebuild" | "deep" | "verify";
+  phase: "quick" | "rebuild" | "deep" | "finalize" | "verify";
   position: number;
   total: number;
   found: number;
+}
+
+/** Risultati parziali disponibili durante la scansione. */
+export interface ScanUpdate {
+  files: number;
+  deleted: number;
+  carved: number;
+  /** Cartelle ricostruite provvisorie: si sistemano a fine lettura. */
+  provisional: boolean;
 }
 
 export interface ScanDone {

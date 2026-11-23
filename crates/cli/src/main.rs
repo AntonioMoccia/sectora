@@ -11,9 +11,9 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sectora_engine::{
-    carve, check_destination, create_image, devices, recover_entry, recover_file, scan_all,
-    BlockSource, CarveOptions, Condition, Event, FileEntry, FileKind, Flow, Found, Integrity,
-    ReadOnlySource, ScanOptions,
+    carve, check_destination, create_image, devices, recover_entry, recover_file, BlockSource,
+    CarveOptions, Condition, Event, FileEntry, FileKind, Flow, Found, Integrity, ReadOnlySource,
+    ScanOptions, ScanPhase,
 };
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -245,6 +245,69 @@ fn cmd_devices(json: bool) -> Result<()> {
 }
 
 /// Stampa l'avanzamento al massimo una volta al secondo.
+/// Durata leggibile: "2 h 15 min", "12 min", "45 s".
+fn duration(secs: f64) -> String {
+    let s = secs.round() as u64;
+    if s < 60 {
+        return format!("{s} s");
+    }
+    let m = (s + 30) / 60;
+    if m < 60 {
+        return format!("{m} min");
+    }
+    format!("{} h {:02} min", m / 60, m % 60)
+}
+
+/// `scan_all` con l'avanzamento di ogni fase sul terminale.
+fn scan_all_progress(src: &ReadOnlySource, opts: ScanOptions) -> Vec<sectora_engine::Volume> {
+    let mut progress = Progress::new();
+    let mut phase = None;
+    let mut verify_started = Instant::now();
+    let mut verify_last = Instant::now() - Duration::from_secs(2);
+    let volumes = sectora_engine::scan_all_with(src, opts, |p, pos, total| {
+        if phase != Some(p) {
+            if phase.is_some() {
+                eprintln!();
+            }
+            phase = Some(p);
+            match p {
+                ScanPhase::Rebuild => eprintln!("Lettura completa del disco (ricostruzione delle cartelle):"),
+                ScanPhase::Finalize => eprintln!(
+                    "Unione delle cartelle ritrovate: su dischi grandi può richiedere qualche minuto…"
+                ),
+                ScanPhase::Verify => {
+                    verify_started = Instant::now();
+                    eprintln!("Verifica dei file cancellati:")
+                }
+            }
+        }
+        match p {
+            ScanPhase::Rebuild => progress.update(pos, total, 0),
+            ScanPhase::Verify
+                if verify_last.elapsed() >= Duration::from_secs(1) || pos == total =>
+            {
+                verify_last = Instant::now();
+                let rate = pos as f64 / verify_started.elapsed().as_secs_f64().max(0.001);
+                let eta = if rate > 0.0 && pos < total {
+                    format!(
+                        "  circa {} alla fine",
+                        duration((total - pos) as f64 / rate)
+                    )
+                } else {
+                    String::new()
+                };
+                eprint!("\r{pos} / {total} file{eta}      ");
+                let _ = std::io::stderr().flush();
+            }
+            _ => {}
+        }
+    });
+    if phase.is_some() {
+        eprintln!();
+    }
+    volumes
+}
+
 struct Progress {
     started: Instant,
     last: Instant,
@@ -270,11 +333,25 @@ impl Progress {
         } else {
             100.0
         };
+        let rate = pos as f64 / secs;
+        let eta = if rate > 0.0 && pos < total {
+            format!(
+                "  circa {} alla fine",
+                duration((total - pos) as f64 / rate)
+            )
+        } else {
+            String::new()
+        };
+        let found = if found > 0 {
+            format!("  file trovati: {found}")
+        } else {
+            String::new()
+        };
         eprint!(
-            "\r{pct:5.1}%  {} / {}  {}/s  file trovati: {found}   ",
+            "\r{pct:5.1}%  {} / {}  {}/s{eta}{found}   ",
             human(pos),
             human(total),
-            human((pos as f64 / secs) as u64)
+            human(rate as u64)
         );
         let _ = std::io::stderr().flush();
     }
@@ -442,7 +519,7 @@ fn condition_label(c: Condition) -> &'static str {
 
 fn cmd_quick(source: PathBuf, filter: EntryFilter, json: bool) -> Result<()> {
     let src = open(&source)?;
-    let volumes = scan_all(
+    let volumes = scan_all_progress(
         &src,
         ScanOptions {
             rebuild: filter.rebuild,
@@ -507,7 +584,7 @@ fn cmd_quick(source: PathBuf, filter: EntryFilter, json: bool) -> Result<()> {
 fn cmd_restore(source: PathBuf, out: PathBuf, filter: EntryFilter) -> Result<()> {
     let src = open(&source)?;
     check_destination(&src, &out)?;
-    let volumes = scan_all(
+    let volumes = scan_all_progress(
         &src,
         ScanOptions {
             rebuild: filter.rebuild,

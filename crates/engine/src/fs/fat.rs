@@ -144,6 +144,56 @@ pub(crate) fn plausible_entries(d: &[u8]) -> bool {
     valid >= 2
 }
 
+/// Elenco di un blocco di directory per l'anteprima in tempo reale (vedi
+/// `live`): voci valide, senza "." e "..".
+pub(crate) fn listing(d: &[u8], fat32: bool) -> Vec<super::live::LiveItem> {
+    let mut out = Vec::new();
+    let mut parts: Vec<(u8, [u16; 13])> = Vec::new();
+    for e in d.chunks_exact(32) {
+        if e[0] == 0 {
+            break;
+        }
+        if e[11] == 0x0F {
+            if e[0] & 0x40 != 0 {
+                parts.clear();
+            }
+            let mut units = [0u16; 13];
+            for (i, off) in [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+                .iter()
+                .enumerate()
+            {
+                units[i] = u16::from_le_bytes([e[*off], e[off + 1]]);
+            }
+            parts.push((e[13], units));
+            continue;
+        }
+        let lfn = std::mem::take(&mut parts);
+        let attr = e[11];
+        let chars_ok = e[0..11].iter().enumerate().all(|(i, &b)| {
+            (i == 0 && matches!(b, 0xE5 | 0x05))
+                || (b >= 0x20 && !b"\"*+,./:;<=>?[\\]|".contains(&b))
+        });
+        if attr & 0x08 != 0 || attr & 0xC0 != 0 || e[0] == b'.' || e[0] == b' ' || !chars_ok {
+            continue;
+        }
+        let mut short = [0u8; 11];
+        short.copy_from_slice(&e[0..11]);
+        let deleted = short[0] == 0xE5;
+        let name = long_name(&lfn, &mut short, deleted)
+            .unwrap_or_else(|| short_name(&short, deleted, e[12]));
+        let le16 = |o: usize| u16::from_le_bytes([e[o], e[o + 1]]);
+        let hi = if fat32 { le16(20) as u32 } else { 0 };
+        out.push(super::live::LiveItem {
+            name,
+            is_dir: attr & 0x10 != 0,
+            cluster: (hi << 16) | le16(26) as u32,
+            size: u32::from_le_bytes([e[28], e[29], e[30], e[31]]) as u64,
+            modified: dos_datetime(le16(24), le16(22)),
+        });
+    }
+    out
+}
+
 /// Nome del primo file completo del blocco (nome lungo che inizia nel blocco).
 fn fat_first_name(d: &[u8]) -> Option<String> {
     let mut parts: Vec<(u8, [u16; 13])> = Vec::new();
@@ -470,7 +520,8 @@ impl Fat<'_> {
             self.next_id += 1;
         }
 
-        if let Some((last, missing)) = tail {
+        // Solo le cartelle incomplete possono ricevere blocchi ritrovati.
+        if let Some((last, missing)) = tail.filter(|t| t.1 > 0) {
             let mut t = DirTail::new(
                 parent,
                 last,
@@ -708,8 +759,7 @@ impl Fat<'_> {
                 if let Some(i) =
                     fragment_owner(&self.tails, c, first.as_deref(), |t| fat_fit(t, &data))
                 {
-                    let owner = &mut self.tails[i];
-                    owner.missing = 0;
+                    let mut owner = self.tails.swap_remove(i);
                     let path = owner.path.clone();
                     let mut joined = std::mem::take(&mut owner.pending);
                     joined.extend_from_slice(&data);
@@ -747,6 +797,7 @@ pub(crate) struct State {
     found: BTreeMap<u32, u32>,
     frags: Vec<u32>,
     tails: Vec<DirTail>,
+    live: super::live::LiveTree,
 }
 
 impl State {
@@ -797,11 +848,26 @@ impl State {
             };
             if let Some(parent) = self.dir_parent(c, head) {
                 self.found.insert(c, parent);
+                // Anteprima: l'elenco è già in memoria, si interpreta subito.
+                if !self.visited.contains(&c) && i < chunk.len() {
+                    let block = &chunk[i..chunk.len().min(i + cs as usize)];
+                    let items = listing(block, self.bpb.fs == FsType::Fat32);
+                    self.live.add(c, Some(parent), items);
+                }
             } else if !self.visited.contains(&c) && plausible_entries(head) {
                 self.frags.push(c);
             }
             k += 1;
         }
+    }
+
+    /// Voci provvisorie per l'anteprima in tempo reale.
+    pub(crate) fn live_entries(&self) -> Vec<FileEntry> {
+        self.live.entries(
+            self.bpb.data_offset,
+            self.bpb.cluster_size,
+            self.bpb.cluster_count,
+        )
     }
 
     pub(crate) fn finish(self, view: &dyn BlockSource) -> Vec<FileEntry> {
@@ -861,6 +927,7 @@ pub fn scan(src: &dyn BlockSource, vol: &mut Volume) -> Result<(), String> {
         found: BTreeMap::new(),
         frags: Vec::new(),
         tails: std::mem::take(&mut fat.tails),
+        live: Default::default(),
     }));
     vol.entries = fat.entries;
     Ok(())

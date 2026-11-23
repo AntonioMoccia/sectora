@@ -15,6 +15,9 @@ pub mod recover;
 pub mod source;
 
 pub use carve::{carve, carve_with, CarveOptions, Event, FileKind, Flow, Found};
-pub use fs::{quick_scan, scan_all, Condition, FileEntry, FsType, Integrity, ScanOptions, Volume};
+pub use fs::{
+    quick_scan, scan_all, scan_all_with, Condition, FileEntry, FsType, Integrity, ScanOptions,
+    ScanPhase, Volume,
+};
 pub use recover::{check_destination, create_image, recover_entry, recover_file, RecoverError};
 pub use source::{BlockSource, MemorySource, ReadOnlySource};

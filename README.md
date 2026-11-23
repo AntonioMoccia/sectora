@@ -66,8 +66,8 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 2. Apri **PowerShell come amministratore** (Start → digita `powershell` → tasto destro →
    *Esegui come amministratore*) ed estrai lo zip in `C:\Sectora`:
    ```powershell
-   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.1.3-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
-   cd C:\Sectora\sectora-cli-v0.1.3-windows-x86_64
+   Expand-Archive "$env:USERPROFILE\Downloads\sectora-cli-v0.2.0-windows-x86_64.zip" -DestinationPath C:\Sectora -Force
+   cd C:\Sectora\sectora-cli-v0.2.0-windows-x86_64
    .\sectora.exe devices
    ```
    Se lo zip è altrove: tasto destro sullo zip → *Copia come percorso* e incollalo al posto del primo
@@ -96,10 +96,10 @@ Scarica il file giusto dalla [pagina delle release](https://github.com/AntonioMo
 
 ```sh
 cd ~/Downloads
-tar xzf sectora-cli-v0.1.3-macos-universal.tar.gz
-xattr -d com.apple.quarantine sectora-cli-v0.1.3-macos-universal/sectora
+tar xzf sectora-cli-v0.2.0-macos-universal.tar.gz
+xattr -d com.apple.quarantine sectora-cli-v0.2.0-macos-universal/sectora
 sudo mkdir -p /usr/local/bin
-sudo mv sectora-cli-v0.1.3-macos-universal/sectora /usr/local/bin/
+sudo mv sectora-cli-v0.2.0-macos-universal/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -132,8 +132,8 @@ apri un'immagine creata con la riga di comando.
 **Riga di comando** (binario statico: funziona su qualsiasi distribuzione)
 
 ```sh
-tar xzf sectora-cli-v0.1.3-linux-x86_64.tar.gz
-sudo install sectora-cli-v0.1.3-linux-x86_64/sectora /usr/local/bin/
+tar xzf sectora-cli-v0.2.0-linux-x86_64.tar.gz
+sudo install sectora-cli-v0.2.0-linux-x86_64/sectora /usr/local/bin/
 sectora --help
 ```
 
@@ -149,11 +149,15 @@ sectora --help
    - **Rapida:** dura pochi secondi e mostra nomi e cartelle originali, ma non trova nulla dopo una
      formattazione;
    - **Profonda:** solo ricerca per firma. Funziona su dischi danneggiati, ma i file non hanno il nome originale.
+   I risultati compaiono **già durante la scansione** e si aggiornano da soli: puoi sfogliarli,
+   filtrarli e vederli in anteprima mentre il disco viene letto. In alto vedi fase, velocità e tempo
+   rimanente. Su un hard disk esterno la lettura completa va a circa 100–150 MB/s: 2 TB richiedono
+   4–6 ore.
 3. **Scegli i file.** A sinistra ci sono le cartelle, in alto le categorie (Foto, Video, Documenti…),
    a destra l'anteprima. Ogni file ha uno stato: *Verificato* e *Recuperabile* sono i più affidabili.
 4. **Dai un nome alle cartelle ritrovate**, se serve (vedi sotto): passa sopra la cartella e fai clic
    su ✎, oppure doppio clic sul nome.
-5. **Recupera** in una cartella **su un altro disco**. Sectora ricrea la struttura delle cartelle con
+5. **Recupera** (si attiva a fine scansione) in una cartella **su un altro disco**. Sectora ricrea la struttura delle cartelle con
    i nomi che vedi a sinistra.
 
 ### Dopo una formattazione: cosa sono le "Cartella ritrovata"
@@ -356,6 +360,7 @@ Arch: `sudo pacman -S webkit2gtk-4.1 gtk3 librsvg libappindicator-gtk3 base-deve
 | `Permesso negato` / `Permission denied` aprendo un disco | Servono i permessi di amministratore | Windows: Prompt come amministratore; macOS e Linux: `sudo` |
 | `Resource busy` su macOS | Il disco è montato | `diskutil unmountDisk /dev/diskN` |
 | `si trova sullo stesso disco fisico della sorgente` | Stai salvando sul disco da recuperare | Scegli una cartella su un altro disco: è una protezione voluta |
+| La scansione sembra ferma | Disco grande: l'1% di 2 TB sono 20 GB, cioè qualche minuto; oppure fase finale "Unione delle cartelle ritrovate" | Guarda velocità e tempo rimanente in alto; i risultati trovati finora sono già consultabili |
 | Nessun file cancellato trovato | SSD con TRIM, o disco formattato | Usa la scansione **Completa** o `--rebuild`; sugli SSD il recupero spesso è impossibile |
 | File con stato *Danneggiato* | Il file era frammentato o è stato sovrascritto | Viene recuperata la parte leggibile; prova anche la ricerca per firma |
 | Windows: "Windows ha protetto il PC" | Pacchetto non firmato | *Ulteriori informazioni → Esegui comunque* |

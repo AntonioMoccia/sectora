@@ -2,6 +2,26 @@
 
 Le versioni seguono il [versionamento semantico](https://semver.org/lang/it/).
 
+## [0.2.0] — 2026-11-23
+
+### Risultati in tempo reale
+- L'app mostra i risultati **mentre la scansione continua**: i file del file system appena letto,
+  quelli trovati per firma e le cartelle ritrovate dopo una formattazione (provvisorie: a fine
+  lettura alcune si uniscono o cambiano nome). Si possono sfogliare, filtrare e vedere in anteprima;
+  il recupero si attiva alla fine. L'aggiornamento non riporta la lista in cima e non perde la
+  selezione.
+- Barra della scansione con fase, velocità di lettura e tempo rimanente stimato.
+
+### Dischi grandi
+- Nuova fase "Unione delle cartelle ritrovate" mostrata a fine lettura (prima la barra restava ferma
+  senza spiegazione).
+- exFAT: i collegamenti tra cartelle si raccolgono durante la lettura, senza rileggere migliaia di
+  blocchi sparsi alla fine.
+- Riattacco dei blocchi di elenco: si confrontano solo le cartelle incomplete (prima tutte, con un
+  costo che cresceva col quadrato del numero di cartelle).
+- Riga di comando: `quick --rebuild` e `restore --rebuild` mostrano l'avanzamento di ogni fase con
+  velocità e tempo rimanente (prima nessuna indicazione per tutta la lettura).
+
 ## [0.1.3] — 2026-11-23
 
 ### Recupero
@@ -82,6 +102,7 @@ Prima versione pubblica.
 - Su macOS i dischi fisici richiedono `sudo`.
 - APFS, HFS+ ed ext4 solo con la ricerca per firma.
 
+[0.2.0]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.2.0
 [0.1.3]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.3
 [0.1.2]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.2
 [0.1.1]: https://github.com/AntonioMoccia/sectora/releases/tag/v0.1.1
